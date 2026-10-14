@@ -1,0 +1,334 @@
+/* Tema escuro para painéis; área do gráfico branca (desenhada no canvas). */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px; color: #e8e8e8;
+  background: #2b2b2b;
+}
+body { display: flex; height: 100vh; overflow: hidden; }
+
+/* ---------- Painel esquerdo ---------- */
+#painel {
+  width: 320px; min-width: 320px; height: 100%;
+  background: #2b2b2b; border-right: 1px solid #1c1c1c;
+  overflow-y: auto; padding: 12px;
+}
+#painel h1 {
+  font-size: 16px; margin: 0 0 12px; font-weight: 600;
+  color: #f0f0f0; line-height: 1.15;
+}
+#painel h1 small { font-size: 11px; color: #9a9a9a; font-weight: 400; }
+.bloco {
+  background: #333; border: 1px solid #3a3a3a; border-radius: 6px;
+  padding: 10px; margin-bottom: 10px;
+}
+.bloco h2 {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+  color: #9a9a9a; margin: 0 0 8px; font-weight: 600;
+}
+.bloco h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: #8a8a8a;
+  margin: 10px 0 6px;
+  font-weight: 600;
+}
+.bloco hr {
+  border: 0;
+  border-top: 1px solid #3f3f3f;
+  margin: 10px 0 4px;
+}
+.bloco label {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 6px; font-size: 12px; color: #ccc;
+}
+.bloco label input[type="range"] { flex: 1; }
+.bloco label input[type="number"],
+.bloco label input[type="text"] {
+  width: 70px; background: #222; color: #eee; border: 1px solid #444;
+  border-radius: 4px; padding: 3px 5px; font-size: 12px;
+}
+.bloco label input[type="color"] {
+  width: 32px; height: 24px; padding: 0; border: 1px solid #444;
+  background: #222; border-radius: 4px; cursor: pointer;
+}
+.bloco label select {
+  flex: 1; background: #222; color: #eee; border: 1px solid #444;
+  border-radius: 4px; padding: 3px 5px; font-size: 12px;
+}
+.bloco label span { min-width: 34px; text-align: right; color: #9a9a9a; font-size: 11px; }
+.bloco label button {
+  background: #3a3a3a; color: #ddd; border: 1px solid #4a4a4a;
+  border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 12px;
+}
+.bloco label button:hover { background: #454545; }
+.btns { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.btns button {
+  background: #3a3a3a; color: #ddd; border: 1px solid #4a4a4a;
+  border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer;
+}
+.btns button:hover { background: #454545; }
+.btns button.ativo { background: #4a7fb5; border-color: #5a8fc5; color: #fff; }
+.aviso { color: #888; font-style: italic; font-size: 12px; }
+.dica {
+  font-size: 11px;
+  color: #888;
+  margin: 2px 0 8px;
+  line-height: 1.35;
+}
+.resumo {
+  font-size: 11px;
+  color: #9ec4ea;
+  background: #2a2f36;
+  border: 1px solid #3a4048;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 4px 0 2px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+#listaCamadas { list-style: none; margin: 0; padding: 0; }
+#listaCamadas li {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px; border-radius: 4px; cursor: pointer;
+  font-size: 12px; color: #ccc;
+}
+#listaCamadas li:hover { background: #3a3a3a; }
+#listaCamadas li.sel { background: #4a7fb5; color: #fff; }
+#listaCamadas .cor {
+  width: 12px; height: 12px; border-radius: 2px; border: 1px solid #555;
+  flex-shrink: 0;
+}
+
+.legenda #legendaItens { font-size: 11px; color: #bbb; }
+.legenda .item { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.legenda .amostra { width: 14px; height: 14px; border: 1px solid #666; }
+
+.atalhos ul { margin: 0; padding-left: 0; list-style: none; font-size: 11px; color: #aaa; line-height: 1.6; }
+.atalhos b { color: #ddd; }
+
+/* Conjunto de classes de altura (0=C .. 11=B) */
+.classes {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.classes label {
+  display: flex; align-items: center; justify-content: center;
+  background: #222; border: 1px solid #444; border-radius: 4px;
+  padding: 3px 0; font-size: 11px; color: #ccc; cursor: pointer;
+  margin: 0;
+}
+.classes input { display: none; }
+.classes input:checked + span {
+  background: #4a7fb5; color: #fff;
+  display: block; width: 100%; text-align: center;
+  border-radius: 3px; margin: -3px 0;
+  padding: 3px 0;
+}
+
+/* Parâmetros de timbre */
+#timbreParams label { margin-bottom: 6px; }
+#timbreParams input[type="number"],
+#timbreParams input[type="range"] { width: 80px; }
+
+/* Prévia do envelope */
+.envelopeBox {
+  background: #1e1e1e;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  padding: 4px;
+  margin-bottom: 8px;
+}
+#envPreview { display: block; width: 100%; height: 70px; background: #1e1e1e; }
+
+/* ---------- Área principal ---------- */
+#area { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#transporte {
+  height: 40px; background: #333; border-bottom: 1px solid #1c1c1c;
+  display: flex; align-items: center; gap: 8px; padding: 0 12px;
+}
+#transporte button {
+  background: #3a3a3a; color: #ddd; border: 1px solid #4a4a4a;
+  border-radius: 4px; height: 26px; padding: 0 8px; cursor: pointer; font-size: 12px;
+}
+#transporte button:hover { background: #454545; }
+#transporte button:disabled { opacity: 0.45; cursor: default; }
+#btnPlay, #btnStop { width: 32px; padding: 0; font-size: 13px; }
+#tempoAtual { font-variant-numeric: tabular-nums; color: #9a9a9a; font-size: 12px; min-width: 60px; }
+#medidor {
+  width: 120px; height: 10px; background: #222; border: 1px solid #444;
+  border-radius: 3px; overflow: hidden;
+}
+#medidorFill {
+  height: 100%; width: 0%; background: linear-gradient(90deg, #4a7fb5, #6ab04c, #e1b12c, #e74c3c);
+  transition: width .05s linear;
+}
+#statusInfo { margin-left: auto; color: #888; font-size: 11px; }
+
+#canvasWrap { flex: 1; position: relative; overflow: hidden; background: #2b2b2b; }
+#grafico { display: block; width: 100%; height: 100%; cursor: crosshair; }
+
+/* ---------- Faixas de automação ---------- */
+/* Altura sempre reservada: o gráfico não muda de tamanho ao
+   selecionar/desselecionar uma camada. O conteúdo apenas fica
+   invisível quando não há seleção (controlado por JS). */
+#automacoes {
+  background: #242424;
+  border-top: 1px solid #1c1c1c;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+  height: 192px;               /* 3*56 + 2*6 + 12 (padding) */
+  min-height: 192px;
+}
+#automacoes.oculto { visibility: hidden; }
+
+.faixa {
+  display: flex;
+  align-items: stretch;
+  height: 56px;
+  background: #2b2b2b;
+  border-top: 1px solid #1c1c1c;
+  border-bottom: 1px solid #1c1c1c;
+  position: relative;
+  border-left: 4px solid #666; /* tarja colorida identifica o tipo */
+}
+.faixa[data-tipo="dinamica"]  { border-left-color: #6ab04c; }
+.faixa[data-tipo="panorama"]  { border-left-color: #4a90d9; }
+.faixa[data-tipo="reverb"]    { border-left-color: #9b59b6; }
+
+.faixaLabel {
+  width: 84px;
+  min-width: 84px;
+  background: #333;
+  color: #ccc;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-right: 1px solid #1c1c1c;
+  user-select: none;
+}
+.faixa[data-tipo="dinamica"] .faixaLabel { color: #a9d99a; }
+.faixa[data-tipo="panorama"] .faixaLabel { color: #9ec4ea; }
+.faixa[data-tipo="reverb"]   .faixaLabel { color: #c9a3db; }
+
+/* O canvas ocupa o restante da faixa. A largura real é
+   obtida via getBoundingClientRect() em view.js. */
+.faixaCanvas {
+  flex: 1;
+  height: 100%;
+  display: block;
+  background: #fff;
+  cursor: crosshair;
+}
+
+/* Lista de relações */
+#listaRelacoes { list-style: none; margin: 6px 0 0; padding: 0; }
+#listaRelacoes li {
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #ccc;
+  background: #2f2f2f;
+  margin-bottom: 6px;
+  border: 1px solid transparent;
+}
+#listaRelacoes li.sel { border-color: #4a7fb5; background: #333c48; }
+#listaRelacoes li .tag {
+  display: inline-block; background: #4a7fb5; color: #fff;
+  border-radius: 3px; padding: 0 5px; margin-right: 4px; font-size: 10px;
+}
+.relacaoLinha {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 4px;
+}
+.relacaoRotulo {
+  width: 62px; min-width: 62px;
+  color: #9a9a9a; font-size: 10px; text-transform: uppercase;
+}
+.relacaoRange { flex: 1; min-width: 40px; }
+.relacaoValor {
+  width: 46px; min-width: 46px;
+  text-align: right; color: #ddd; font-variant-numeric: tabular-nums;
+}
+.relacaoToggle {
+  width: 20px; height: 18px; padding: 0;
+  background: #3a3a3a; color: #aaa; border: 1px solid #4a4a4a;
+  border-radius: 3px; cursor: pointer; font-size: 10px; line-height: 1;
+}
+.relacaoToggle:hover { background: #454545; }
+.relacaoAtingidos {
+  margin-top: 4px;
+  color: #8a8a8a;
+  font-size: 10px;
+  font-style: italic;
+  line-height: 1.4;
+}
+.relacaoAtingidos b { color: #a9d99a; font-style: normal; font-weight: 600; }
+.relacaoRemover {
+  margin-top: 4px;
+  background: #3a3a3a; color: #d88; border: 1px solid #5a4a4a;
+  border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 10px;
+}
+.relacaoRemover:hover { background: #4a3a3a; }
+
+/* Diálogo (exportação) */
+.dialogo {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.dialogoBox {
+  background: #2b2b2b;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 16px 18px;
+  width: 340px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.6);
+}
+.dialogoBox h2 {
+  font-size: 14px; margin: 0 0 10px;
+  text-transform: uppercase; letter-spacing: .06em;
+  color: #ddd;
+}
+.dialogoBox label {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; font-size: 12px; color: #ccc;
+}
+.dialogoBox label input[type="text"],
+.dialogoBox label select {
+  flex: 1; background: #222; color: #eee;
+  border: 1px solid #444; border-radius: 4px;
+  padding: 4px 6px; font-size: 12px;
+}
+.dialogoBtns {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 12px;
+}
+.dialogoBtns button {
+  background: #3a3a3a; color: #ddd; border: 1px solid #4a4a4a;
+  border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px;
+}
+.dialogoBtns button:hover { background: #454545; }
+.dialogoBtns button.primario {
+  background: #4a7fb5; border-color: #5a8fc5; color: #fff;
+}
+.progresso {
+  height: 8px; background: #222; border: 1px solid #444;
+  border-radius: 4px; overflow: hidden; margin: 10px 0 6px;
+}
+.progresso > div {
+  height: 100%; width: 0%;
+  background: linear-gradient(90deg, #4a7fb5, #6ab04c);
+  transition: width .15s linear;
+}

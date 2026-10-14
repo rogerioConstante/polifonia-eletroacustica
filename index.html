@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<title>Polifonia Eletroacústica</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ============ PAINEL ESQUERDO ============ -->
+  <aside id="painel">
+    <h1>Polifonia<br><small>Eletroacústica</small></h1>
+
+    <section class="bloco">
+      <h2>Projeto</h2>
+      <div class="btns">
+        <button id="btnNovo" title="Novo projeto">Novo</button>
+        <button id="btnAbrir" title="Abrir JSON">Abrir…</button>
+        <button id="btnSalvar" title="Salvar JSON">Salvar</button>
+      </div>
+      <label title="Volume geral da peça">Volume master <input type="range" id="volMaster" min="0" max="1" step="0.01" value="0.8"><span id="volMasterVal">0.80</span></label>
+      <label title="Duração total do projeto em segundos">Duração total (s) <input type="number" id="durTotal" min="1" max="600" value="30"></label>
+      <label title="Tempo de decaimento da reverberação (IR sintetizada)">Tempo de reverb (s) <input type="number" id="reverbTempo" min="0.1" max="10" step="0.1" value="2"></label>
+      <label title="Se marcado, vértices de polígonos encaixam em semitons"><input type="checkbox" id="snapAltura"> Snap altura (semitons)</label>
+    </section>
+
+    <section class="bloco">
+      <h2>Ferramentas</h2>
+      <div class="btns">
+        <button id="btnSelect" class="ativo" title="Selecionar/editar (V)">Selecionar</button>
+        <button id="btnDraw" title="Desenhar polígono (P)">Desenhar</button>
+        <button id="btnDelete" title="Excluir seleção (Del)">Excluir</button>
+        <button id="btnDuplicate" title="Duplicar (Ctrl+D)">Duplicar</button>
+      </div>
+      <div class="btns">
+        <button id="btnUndo" title="Desfazer (Ctrl+Z)">↶ Desfazer</button>
+        <button id="btnRedo" title="Refazer (Ctrl+Y)">↷ Refazer</button>
+        <button id="btnZoomHMenos">H−</button>
+        <button id="btnZoomHMais">H+</button>
+        <button id="btnZoomVMenos">V−</button>
+        <button id="btnZoomVMais">V+</button>
+        <button id="btnFit">Ajustar</button>
+      </div>
+    </section>
+
+    <section class="bloco">
+      <h2>Camada selecionada</h2>
+      <div id="semCamada" class="aviso">Nenhuma camada selecionada.</div>
+      <div id="propsCamada" style="display:none">
+
+        <label>Nome <input type="text" id="cNome"></label>
+        <label>Cor <input type="color" id="cCor" value="#4a90d9"></label>
+        <label title="Padrão de hachura do polígono (identifica o tipo de objeto)">Preenchimento
+          <select id="cPadrao">
+            <option value="hachura">Hachura</option>
+            <option value="pontos">Pontos</option>
+            <option value="linhas">Linhas</option>
+            <option value="xadrez">Xadrez</option>
+          </select>
+        </label>
+        <label title="Como o som é gerado dentro do polígono">Tipo de objeto
+          <select id="cTipo">
+            <option value="nota">Nota / pontual</option>
+            <option value="gliss">Glissando / trajetória</option>
+            <option value="granular">Textura granular</option>
+            <option value="ruido">Ruído filtrado</option>
+          </select>
+        </label>
+        <label>Volume <input type="range" id="cVol" min="0" max="1" step="0.01" value="0.8"><span id="cVolVal">0.80</span></label>
+
+        <hr>
+        <h3>Ritmo</h3>
+        <label title="Duração de um pulso (s). Editar aqui atualiza o BPM.">Pulso (s) <input type="number" id="cPulso" step="0.01" min="0.02" value="0.5"></label>
+        <label title="Andamento em BPM (60 / pulso). Editar aqui atualiza o pulso.">Andamento (BPM) <input type="number" id="cBpm" min="20" max="600" value="120"></label>
+        <label title="Slots (ataques potenciais) por pulso. Passo = pulso / densidade.">Densidade (ev/pulso) <input type="number" id="cDens" step="0.1" min="0.1" value="1"></label>
+        <label title="Lista de 1 (ataque) e 0 (pausa), percorrida ciclicamente sobre os slots.">Padrão rítmico
+          <input type="text" id="cPadraoRitmico" placeholder="1,0,1,1">
+        </label>
+        <div class="dica">Sequência de 1 (ataque) e 0 (pausa), cíclica.</div>
+        <div id="cRitmoResumo" class="resumo" title="Resumo calculado a partir de pulso, densidade e padrão"></div>
+
+        <hr>
+        <h3>Altura</h3>
+        <label title="livre = altura contínua; semitons = arredonda MIDI; conjunto = arredonda para a classe mais próxima da lista">Quantização
+          <select id="cQuant">
+            <option value="livre">Livre</option>
+            <option value="semitons">Semitons</option>
+            <option value="conjunto">Conjunto de classes</option>
+          </select>
+        </label>
+        <div id="conjuntoWrap" style="display:none">
+          <div class="dica">Marque as classes de altura permitidas (0 = C):</div>
+          <div id="classesBox" class="classes"></div>
+        </div>
+
+        <hr>
+        <h3>Timbre</h3>
+        <label title="Modelo de síntese da voz">Tipo
+          <select id="cTimbre">
+            <option value="sine">Sine</option>
+            <option value="aditiva">Aditiva</option>
+            <option value="fm">FM simples</option>
+            <option value="ruido">Ruído filtrado</option>
+          </select>
+        </label>
+        <div id="timbreParams"></div>
+
+        <hr>
+        <h3>Envelope</h3>
+        <div class="envelopeBox">
+          <canvas id="envPreview" width="280" height="70"></canvas>
+        </div>
+        <label title="Ataque (% da duração do evento). A soma A+D+S+R é normalizada para 100.">A (ataque %) <input type="number" id="envA" min="0" max="100" step="1" value="5"></label>
+        <label title="Decaimento (% da duração do evento)">D (decaimento %) <input type="number" id="envD" min="0" max="100" step="1" value="10"></label>
+        <label title="Sustentação (% da duração do evento)">S (sustentação %) <input type="number" id="envS" min="0" max="100" step="1" value="70"></label>
+        <label title="Release (% da duração do evento)">R (release %) <input type="number" id="envR" min="0" max="100" step="1" value="15"></label>
+        <label title="Nível da etapa S em relação ao pico (0..1)">Nível de sustain <input type="number" id="envSustain" min="0" max="1" step="0.05" value="0.7"></label>
+        <label title="100 = todos os eventos seguem o envelope definido; 0 = variação aleatória máxima">Rigor (%) <input type="number" id="envRigor" min="0" max="100" step="1" value="100"></label>
+
+        <hr>
+        <h3>Aleatoriedade</h3>
+        <label title="Semente do gerador pseudoaleatório. Mesma semente = mesma peça.">Semente <input type="number" id="cSemente" value="1">
+          <button id="btnSortear" title="Sortear nova semente">🎲</button>
+        </label>
+
+        <hr>
+        <label><input type="checkbox" id="cMudo"> Mudo</label>
+        <label><input type="checkbox" id="cSolo"> Solo</label>
+      </div>
+    </section>
+
+    <section class="bloco">
+      <h2>Camadas</h2>
+      <ul id="listaCamadas"></ul>
+    </section>
+
+    <section class="bloco">
+      <h2>Relações</h2>
+      <div class="btns">
+        <button id="btnNovaRelacao" title="Criar relação (1ª selecionada = referência)">+ Nova relação</button>
+        <button id="btnRemoverRelacao" title="Remover relação selecionada">− Remover</button>
+      </div>
+      <div id="semRelacoes" class="aviso">Selecione 2+ camadas para criar relações.</div>
+      <ul id="listaRelacoes"></ul>
+      <div class="dica">
+        1ª camada selecionada = <b>referência</b>; as demais = <b>dependentes</b>.
+        Os valores mostram o alvo; o "atingido" é recalculado ao editar ou ao tocar.
+      </div>
+    </section>
+
+    <section class="bloco legenda">
+      <h2>Legenda</h2>
+      <div id="legendaItens"></div>
+    </section>
+
+    <section class="bloco atalhos">
+      <h2>Atalhos</h2>
+      <ul>
+        <li><b>V</b> selecionar · <b>P</b> desenhar</li>
+        <li><b>Del</b> excluir · <b>Ctrl+D</b> duplicar</li>
+        <li><b>Ctrl+Z / Ctrl+Y</b> desfazer/refazer</li>
+        <li><b>Ctrl+S</b> salvar JSON · <b>Ctrl+O</b> abrir</li>
+        <li><b>Enter</b> fechar polígono · <b>Esc</b> cancelar</li>
+        <li><b>Shift+clique</b> multi-seleção</li>
+        <li>Roda: rolagem horizontal · <b>Shift+roda</b>: vertical</li>
+        <li><b>Ctrl+roda</b>: zoom horizontal · <b>Alt+roda</b>: zoom vertical</li>
+        <li><b>Snap altura</b> (opcional): encaixa em semitons</li>
+        <li><b>Automação:</b> clique = novo ponto · arrastar = mover</li>
+        <li><b>Duplo clique</b> no ponto alterna linear/suave</li>
+        <li><b>Botão direito</b> no ponto remove · <b>Shift+clique</b> vazio ignora</li>
+        <li><b>Ctrl+E</b> exportar WAV · <b>Espaço</b> tocar/pausar</li>
+      </ul>
+    </section>
+  </aside>
+
+  <!-- ============ ÁREA PRINCIPAL ============ -->
+  <main id="area">
+    <div id="transporte">
+      <button id="btnPlay" title="Tocar (Espaço)">▶</button>
+      <button id="btnPlayCamada" title="Tocar somente a camada selecionada" disabled>▶ Camada</button>
+      <button id="btnStop" title="Parar">■</button>
+      <button id="btnExportar" title="Exportar WAV (Ctrl+E)">⤓ WAV</button>
+      <span id="tempoAtual">0.00 s</span>
+      <div id="medidor"><div id="medidorFill"></div></div>
+      <span id="statusInfo">pronto</span>
+    </div>
+    <div id="canvasWrap">
+      <canvas id="grafico"></canvas>
+    </div>
+    <div id="automacoes">
+      <div class="faixa" data-tipo="dinamica">
+        <div class="faixaLabel">Dinâmica</div>
+        <canvas class="faixaCanvas"></canvas>
+      </div>
+      <div class="faixa" data-tipo="panorama">
+        <div class="faixaLabel">Panorama</div>
+        <canvas class="faixaCanvas"></canvas>
+      </div>
+      <div class="faixa" data-tipo="reverb">
+        <div class="faixaLabel">Reverb</div>
+        <canvas class="faixaCanvas"></canvas>
+      </div>
+    </div>
+      <div id="dlgExportar" class="dialogo" style="display:none">
+      <div class="dialogoBox">
+        <h2>Exportar WAV</h2>
+        <label>Nome
+          <input type="text" id="expNome" value="polifonia">
+        </label>
+        <label>Profundidade
+          <select id="expBits">
+            <option value="16">16 bits</option>
+            <option value="24">24 bits</option>
+          </select>
+        </label>
+        <label>Sample rate
+          <select id="expSR">
+            <option value="44100">44100 Hz</option>
+            <option value="48000">48000 Hz</option>
+          </select>
+        </label>
+        <label>Escopo
+          <select id="expEscopo">
+            <option value="tudo">Toda a composição</option>
+            <option value="solo">Somente a camada selecionada</option>
+          </select>
+        </label>
+        <div id="expProgresso" class="progresso"><div id="expProgressoFill"></div></div>
+        <div id="expStatus" class="dica">Pronto.</div>
+        <div class="dialogoBtns">
+          <button id="expCancelar">Cancelar</button>
+          <button id="expConfirmar" class="primario">Exportar</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
