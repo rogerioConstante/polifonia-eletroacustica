@@ -1,37 +1,24 @@
 // ============================================================
-// view.js — Renderização do gráfico (grade, polígonos, desenho)
+// view.js — Renderização do gráfico
 // ============================================================
-//
-// Correções (rodada 2):
-//  - Constante CALHA_PX reserva à esquerda do gráfico a mesma
-//    largura da coluna de rótulos das faixas. Isso faz com que o
-//    mesmo `t` caia na mesma coordenada x no gráfico e nas faixas.
-//  - A calha também serve para exibir os rótulos de altura (nota +
-//    Hz), sem que o usuário desenhe por cima.
-//  - As faixas de automação agora desenham o cursor de reprodução.
 
-import { estado, estaSelecionada, camadaSelecionada } from './model.js';
+import { estado, estaSelecionada, camadaSelecionada, extensaoTemporal } from './model.js';
 
-// Largura da calha à esquerda do gráfico (em CSS px).
-// 4 (borda esquerda) + 84 (rótulo da faixa) + 1 (borda direita) = 89.
-// Mantida em um único lugar para evitar desalinhamento.
-export const CALHA_PX = 89;
+export const CALHA_PX = 52;
 
 let canvas, ctx, dpr = 1;
 let W = 0, H = 0;
 let _resizeObserver = null;
 
-/** Inicializa o canvas e ajusta o DPR. */
 export function initView(canvasEl) {
   canvas = canvasEl;
   ctx = canvas.getContext('2d');
   redimensionar();
+  document.documentElement.style.setProperty('--calha', CALHA_PX + 'px');
 
   const wrap = canvas.parentElement;
   if (_resizeObserver) _resizeObserver.disconnect();
-  _resizeObserver = new ResizeObserver(() => {
-    redimensionar();
-  });
+  _resizeObserver = new ResizeObserver(() => { redimensionar(); });
   _resizeObserver.observe(wrap);
 }
 
@@ -40,9 +27,7 @@ function redimensionar() {
   const r = canvas.parentElement.getBoundingClientRect();
   const novoW = Math.max(1, Math.floor(r.width));
   const novoH = Math.max(1, Math.floor(r.height));
-  if (novoW === W && novoH === H && canvas.width === novoW * dpr) {
-    return;
-  }
+  if (novoW === W && novoH === H && canvas.width === novoW * dpr) return;
   W = novoW; H = novoH;
   canvas.width = W * dpr;
   canvas.height = H * dpr;
@@ -54,16 +39,8 @@ function redimensionar() {
 
 export function tamanhoCanvas() { return { W, H }; }
 
-// ------------------------------------------------------------
-// Conversões tempo <-> pixel e freq <-> pixel
-// ------------------------------------------------------------
-// A calha desloca TODAS as conversões horizontais.
-export function tParaX(t) {
-  return CALHA_PX + (t - estado.scrollX) * estado.zoomX;
-}
-export function xParaT(x) {
-  return (x - CALHA_PX) / estado.zoomX + estado.scrollX;
-}
+export function tParaX(t) { return CALHA_PX + (t - estado.scrollX) * estado.zoomX; }
+export function xParaT(x) { return (x - CALHA_PX) / estado.zoomX + estado.scrollX; }
 export function fParaY(f) {
   const base = Math.log2(estado.fMin);
   return H - (Math.log2(f) - base) * estado.zoomY;
@@ -78,26 +55,18 @@ export function hzParaMidi(f) { return 69 + 12 * Math.log2(f / 440); }
 
 const NOMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 export function nomeNota(m) {
-  const oit = Math.floor(m / 12) - 2; // C3 = dó central
+  const oit = Math.floor(m / 12) - 2;
   return NOMES[((m % 12) + 12) % 12] + oit;
 }
 
-// ------------------------------------------------------------
-// Grade: régua em SEGUNDOS + grade de altura + calha à esquerda
-// ------------------------------------------------------------
 export function desenharGrade() {
-  // Área do gráfico (branca)
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(CALHA_PX, 0, W - CALHA_PX, H);
-
-  // Calha (cinza escuro)
   ctx.fillStyle = '#2b2b2b';
   ctx.fillRect(0, 0, CALHA_PX, H);
 
   const t0 = estado.scrollX;
   const t1 = xParaT(W);
-
-  // ----- 1) Régua de SEGUNDOS -----
   const passo = passoBonito(t1 - t0, 10);
   const sIni = Math.floor(t0 / passo) * passo;
   const sFim = Math.ceil(t1 / passo) * passo;
@@ -132,9 +101,7 @@ export function desenharGrade() {
     ctx.fillText(formatarSegundos(s), x + 3, 14);
   }
 
-  // ----- 2) Linhas horizontais (semitons / oitavas) -----
-  const fTopo = yParaF(0);
-  const fBase = yParaF(H);
+  const fTopo = yParaF(0), fBase = yParaF(H);
   const mTopo = Math.ceil(hzParaMidi(fTopo));
   const mBase = Math.floor(hzParaMidi(fBase));
 
@@ -149,22 +116,26 @@ export function desenharGrade() {
   ctx.stroke();
 
   ctx.strokeStyle = 'rgba(0,0,0,0.18)';
-  ctx.font = '10px system-ui';
-  ctx.textAlign = 'left';
   ctx.beginPath();
+  for (let m = mBase; m <= mTopo; m++) {
+    if (m % 12 !== 0) continue;
+    const y = Math.round(fParaY(midiParaHz(m))) + 0.5;
+    if (y < 0 || y > H) continue;
+    ctx.moveTo(CALHA_PX, y); ctx.lineTo(W, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(220,220,220,0.85)';
+  ctx.font = '9px system-ui';
+  ctx.textAlign = 'left';
   for (let m = mBase; m <= mTopo; m++) {
     if (m % 12 !== 0) continue;
     const f = midiParaHz(m);
     const y = Math.round(fParaY(f)) + 0.5;
     if (y < 0 || y > H) continue;
-    ctx.moveTo(CALHA_PX, y); ctx.lineTo(W, y);
-    // rótulo dentro da calha (fundo escuro, texto claro)
-    ctx.fillStyle = 'rgba(220,220,220,0.85)';
-    ctx.fillText(`${nomeNota(m)} · ${f.toFixed(1)}`, 4, y - 3);
+    ctx.fillText(`${nomeNota(m)} ${Math.round(f)}`, 3, y - 2);
   }
-  ctx.stroke();
 
-  // Linha divisória entre calha e gráfico
   ctx.strokeStyle = 'rgba(0,0,0,0.5)';
   ctx.beginPath();
   ctx.moveTo(CALHA_PX + 0.5, 0);
@@ -193,9 +164,6 @@ function formatarSegundos(s) {
   return s.toFixed(0) + 's';
 }
 
-// ------------------------------------------------------------
-// Polígonos das camadas
-// ------------------------------------------------------------
 export function desenharCamadas() {
   for (const cam of estado.projeto.camadas) {
     if (cam.mudo && !cam.solo) continue;
@@ -220,23 +188,15 @@ function desenharPoligono(cam) {
 
   ctx.save();
   ctx.beginPath();
-  // Recorta à área do gráfico (à direita da calha).
-  ctx.rect(CALHA_PX, 0, W - CALHA_PX, H);
-  ctx.clip();
-
-  // Preenchimento
-  ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
   ctx.closePath();
   ctx.clip();
-
   ctx.fillStyle = corComAlfa(cam.cor, 0.30);
   ctx.fillRect(CALHA_PX, 0, W - CALHA_PX, H);
   desenharPadrao(cam.padraoPreenchimento, cam.cor);
   ctx.restore();
 
-  // Borda
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
@@ -245,7 +205,6 @@ function desenharPoligono(cam) {
   ctx.strokeStyle = estaSelecionada(cam.id) ? '#000' : corComAlfa(cam.cor, 0.9);
   ctx.stroke();
 
-  // Vértices
   for (const p of pts) {
     ctx.beginPath();
     ctx.arc(p[0], p[1], estaSelecionada(cam.id) ? 4 : 3, 0, Math.PI * 2);
@@ -254,7 +213,6 @@ function desenharPoligono(cam) {
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
   }
 
-  // Nome
   const c = centroide(pts);
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
   ctx.font = '11px system-ui'; ctx.textAlign = 'center';
@@ -279,7 +237,6 @@ function desenharPadrao(tipo, cor) {
   ctx.strokeStyle = corComAlfa(cor, 0.35);
   ctx.fillStyle = corComAlfa(cor, 0.35);
   ctx.lineWidth = 1;
-
   if (tipo === 'hachura') {
     ctx.beginPath();
     for (let x = CALHA_PX - H; x < W + H; x += passo) {
@@ -305,9 +262,6 @@ function desenharPadrao(tipo, cor) {
   }
 }
 
-// ------------------------------------------------------------
-// Desenho em progresso
-// ------------------------------------------------------------
 export function desenharEmProgresso() {
   const d = estado.desenhando;
   if (!d || d.vertices.length === 0) return;
@@ -323,10 +277,8 @@ export function desenharEmProgresso() {
   }
 }
 
-// ------------------------------------------------------------
-// Cursor de reprodução (gráfico principal)
-// ------------------------------------------------------------
 export function desenharCursor(tempo) {
+  if (tempo == null) return;
   const x = tParaX(tempo);
   if (x < CALHA_PX || x > W) return;
   ctx.beginPath();
@@ -335,11 +287,11 @@ export function desenharCursor(tempo) {
 }
 
 // ------------------------------------------------------------
-// Faixas de automação: desenho + hit-test
+// Faixas de automação
 // ------------------------------------------------------------
 export const estadoAutomacao = {
-  selecionada: null,
-  arrasto: null,
+  selecionada: null,   // { camId, tipo, ponto }  (item 1c)
+  arrasto: null,       // { camId, tipo, ponto }  (item 1c)
 };
 
 export function desenharAutomacoes() {
@@ -347,25 +299,24 @@ export function desenharAutomacoes() {
   if (!cont) return;
   const cam = camadaSelecionada();
 
-  if (!cam) {
-    cont.classList.add('oculto');
-    return;
-  }
+  if (!cam) { cont.classList.add('oculto'); return; }
   cont.classList.remove('oculto');
+
+  const ext = extensaoTemporal(cam);
+  const t0 = ext ? ext.t0 : null;
+  const t1 = ext ? ext.t1 : null;
 
   const canvases = cont.querySelectorAll('.faixaCanvas');
   canvases.forEach(cv => {
     const tipo = cv.parentElement.dataset.tipo;
     const dpr = window.devicePixelRatio || 1;
 
-    // Largura REAL do canvas (nunca constante).
     const r = cv.getBoundingClientRect();
     const w = Math.max(1, Math.floor(r.width));
     const h = Math.max(1, Math.floor(r.height));
     if (cv.width !== Math.floor(w * dpr) || cv.height !== Math.floor(h * dpr)) {
       cv.width = Math.floor(w * dpr);
       cv.height = Math.floor(h * dpr);
-      // O CSS já define width/height via flex; não forçamos inline.
     }
     const c = cv.getContext('2d');
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -373,17 +324,14 @@ export function desenharAutomacoes() {
     c.fillStyle = '#fff';
     c.fillRect(0, 0, w, h);
 
-    // O tempo `t` é mapeado para x do canvas usando a MESMA
-    // função do gráfico, subtraindo CALHA_PX (já que o canvas da
-    // faixa começa DEPOIS do rótulo).
     const xT = (t) => tParaX(t) - CALHA_PX;
     const tDeX = (x) => xParaT(x + CALHA_PX);
 
-    // Grid vertical alinhado ao gráfico.
-    const t0 = estado.scrollX, t1 = tDeX(w);
-    const passo = passoBonito(t1 - t0, 10);
-    const sIni = Math.floor(t0 / passo) * passo;
-    const sFim = Math.ceil(t1 / passo) * passo;
+    // Grid vertical
+    const tv0 = estado.scrollX, tv1 = tDeX(w);
+    const passo = passoBonito(tv1 - tv0, 10);
+    const sIni = Math.floor(tv0 / passo) * passo;
+    const sFim = Math.ceil(tv1 / passo) * passo;
     c.strokeStyle = 'rgba(0,0,0,0.08)';
     c.lineWidth = 1;
     c.beginPath();
@@ -396,15 +344,28 @@ export function desenharAutomacoes() {
 
     // Linha média
     c.strokeStyle = 'rgba(0,0,0,0.12)';
-    c.beginPath();
-    c.moveTo(0, h / 2 + 0.5); c.lineTo(w, h / 2 + 0.5);
-    c.stroke();
+    c.beginPath(); c.moveTo(0, h / 2 + 0.5); c.lineTo(w, h / 2 + 0.5); c.stroke();
 
-    // Curva
+    // Véu fora de [t0, t1]
+    if (t0 != null && t1 != null) {
+      const xa = xT(t0);
+      const xb = xT(t1);
+      c.fillStyle = 'rgba(0,0,0,0.18)';
+      if (xa > 0) c.fillRect(0, 0, Math.min(xa, w), h);
+      if (xb < w) c.fillRect(Math.max(0, xb), 0, w - Math.max(0, xb), h);
+      // linhas verticais nas bordas
+      c.strokeStyle = 'rgba(0,0,0,0.35)';
+      c.beginPath();
+      if (xa >= 0 && xa <= w) { c.moveTo(Math.round(xa) + 0.5, 0); c.lineTo(Math.round(xa) + 0.5, h); }
+      if (xb >= 0 && xb <= w) { c.moveTo(Math.round(xb) + 0.5, 0); c.lineTo(Math.round(xb) + 0.5, h); }
+      c.stroke();
+    }
+
+    // Curva + pontos
     const pts = (cam.automacoes[tipo] || []).slice().sort((a, b) => a.t - b.t);
-    desenharCurva(c, pts, tipo, w, h, cam.id, xT);
+    desenharCurva(c, pts, tipo, w, h, cam.id, xT, t0, t1);
 
-    // Cursor de reprodução nas faixas.
+    // Cursor
     if (window.__tempoReproducao != null) {
       const xc = xT(window.__tempoReproducao);
       if (xc >= 0 && xc <= w) {
@@ -415,10 +376,10 @@ export function desenharAutomacoes() {
       }
     }
 
-    // Legenda do ponto selecionado
+    // Valor do ponto selecionado
     const sel = estadoAutomacao.selecionada;
-    if (sel && sel.camId === cam.id && sel.tipo === tipo && pts[sel.idx]) {
-      const p = pts[sel.idx];
+    if (sel && sel.camId === cam.id && sel.tipo === tipo && sel.ponto) {
+      const p = sel.ponto;
       const x = xT(p.t);
       const y = valorParaY(p.v, h);
       c.fillStyle = '#000';
@@ -443,7 +404,7 @@ function formatarValor(tipo, v) {
   return v.toFixed(2);
 }
 
-function desenharCurva(c, pts, tipo, w, h, camId, xT) {
+function desenharCurva(c, pts, tipo, w, h, camId, xT, t0, t1) {
   const corFaixa = tipo === 'dinamica' ? '#6ab04c'
   : tipo === 'panorama' ? '#4a90d9'
   : '#9b59b6';
@@ -467,19 +428,15 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT) {
 
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
-    const xa = xT(a.t);
-    const xb = xT(b.t);
-    const ya = valorParaY(a.v, h);
-    const yb = valorParaY(b.v, h);
+    const xa = xT(a.t), xb = xT(b.t);
+    const ya = valorParaY(a.v, h), yb = valorParaY(b.v, h);
     if (b.t <= estado.scrollX || a.t >= xParaT(w + CALHA_PX)) continue;
     if (a.curva === 'suave') {
       const n = 24;
       for (let k = 1; k <= n; k++) {
         const u = k / n;
         const kk = 0.5 - 0.5 * Math.cos(Math.PI * u);
-        const x = xa + (xb - xa) * u;
-        const y = ya + (yb - ya) * kk;
-        c.lineTo(x, y);
+        c.lineTo(xa + (xb - xa) * u, ya + (yb - ya) * kk);
       }
     } else {
       c.lineTo(xb, yb);
@@ -497,7 +454,9 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT) {
     const x = xT(p.t);
     const y = valorParaY(p.v, h);
     if (x < -8 || x > w + 8) continue;
-    const ehSel = sel && sel.camId === camId && sel.tipo === tipo && sel.idx === i;
+    const fora = (t0 != null && t1 != null) && (p.t < t0 || p.t > t1);
+    const ehSel = sel && sel.camId === camId && sel.tipo === tipo && sel.ponto === p;
+    c.globalAlpha = fora ? 0.35 : 1;
     c.beginPath();
     c.arc(x, y, ehSel ? 5 : 3.5, 0, Math.PI * 2);
     c.fillStyle = ehSel ? '#000' : corFaixa;
@@ -508,11 +467,10 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT) {
       c.arc(x, y, ehSel ? 7.5 : 6, 0, Math.PI * 2);
       c.strokeStyle = corFaixa; c.lineWidth = 1; c.stroke();
     }
+    c.globalAlpha = 1;
   }
 }
 
-// --- hit-test (usado pela UI) ---------------------------------
-// Aqui o x recebido é em coordenadas do canvas da FAIXA.
 export function automacaoHitTest(canvasEl, x, y) {
   const cam = camadaSelecionada();
   if (!cam) return null;
@@ -524,13 +482,13 @@ export function automacaoHitTest(canvasEl, x, y) {
     const p = pts[i];
     const px = xT(p.t);
     const py = valorParaY(p.v, h);
-    if (Math.hypot(px - x, py - y) < 8) return { tipo, idx: i };
+    if (Math.hypot(px - x, py - y) < 8) return { tipo, idx: i, ponto: p };
   }
   return { tipo, idx: -1 };
 }
 
 // ------------------------------------------------------------
-// Loop de render
+// Loop
 // ------------------------------------------------------------
 let precisaRender = true;
 export function marcarRender() { precisaRender = true; }
@@ -541,20 +499,22 @@ export function iniciarLoop() {
     if (precisaRender) {
       precisaRender = false;
       desenharGrade();
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(CALHA_PX, 0, W - CALHA_PX, H);
+      ctx.clip();
       desenharCamadas();
       desenharRelacoes();
       desenharEmProgresso();
+      desenharCursor(window.__tempoReproducao);
+      ctx.restore();
       desenharAutomacoes();
-      if (window.__tempoReproducao != null) desenharCursor(window.__tempoReproducao);
     }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 }
 
-// ------------------------------------------------------------
-// Relações: linhas tracejadas entre camadas
-// ------------------------------------------------------------
 export function desenharRelacoes() {
   for (const r of estado.projeto.relacoes) {
     const ref = camadaPorIdLocal(r.camadaReferencia);

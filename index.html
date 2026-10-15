@@ -6,7 +6,6 @@
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- ============ PAINEL ESQUERDO ============ -->
   <aside id="painel">
     <h1>Polifonia<br><small>Eletroacústica</small></h1>
 
@@ -72,9 +71,8 @@
         <label title="Duração de um pulso (s). Editar aqui atualiza o BPM.">Pulso (s) <input type="number" id="cPulso" step="0.01" min="0.02" value="0.5"></label>
         <label title="Andamento em BPM (60 / pulso). Editar aqui atualiza o pulso.">Andamento (BPM) <input type="number" id="cBpm" min="20" max="600" value="120"></label>
         <label title="Slots (ataques potenciais) por pulso. Passo = pulso / densidade.">Densidade (ev/pulso) <input type="number" id="cDens" step="0.1" min="0.1" value="1"></label>
-        <label title="Lista de 1 (ataque) e 0 (pausa), percorrida ciclicamente sobre os slots.">Padrão rítmico
-          <input type="text" id="cPadraoRitmico" placeholder="1,0,1,1">
-        </label>
+        <label title="Lista de 1 (ataque) e 0 (pausa), percorrida ciclicamente sobre os slots.">Padrão rítmico</label>
+        <input type="text" id="cPadraoRitmico" class="campoLargo" placeholder="1,0,1,1">
         <div class="dica">Sequência de 1 (ataque) e 0 (pausa), cíclica.</div>
         <div id="cRitmoResumo" class="resumo" title="Resumo calculado a partir de pulso, densidade e padrão"></div>
 
@@ -91,6 +89,32 @@
           <div class="dica">Marque as classes de altura permitidas (0 = C):</div>
           <div id="classesBox" class="classes"></div>
         </div>
+
+        <hr>
+        <h3>Série de alturas</h3>
+        <label title="Se marcado, a altura de cada ataque vem da série abaixo, em vez do sorteio">
+          <input type="checkbox" id="cSerieAtiva"> Usar série de alturas
+        </label>
+        <input type="text" id="cSerieTexto" class="campoLargo" placeholder="C3, E3, G3, Bb3">
+        <div class="dica">
+          Tokens separados por vírgula ou espaço.<br>
+          <b>C3</b> = dó central (MIDI 60). Aceita <b>C#3</b>, <b>Bb2</b>, <b>do3</b>, <b>mib4</b>,
+          número MIDI (<b>60</b>, <b>60.5</b>), Hz (<b>440hz</b>) e <b>*</b> (altura livre).
+        </div>
+        <label title="Modo de interpretação das alturas da série">Modo
+          <select id="cSerieModo">
+            <option value="absoluta">Alturas absolutas</option>
+            <option value="classe">Classes de altura</option>
+          </select>
+        </label>
+        <label id="serieOitavaWrap" title="Como escolher a oitava no modo classe" style="display:none">
+          Oitava
+          <select id="cSerieOitava">
+            <option value="proxima">Mais próxima da anterior</option>
+            <option value="aleatoria">Aleatória</option>
+          </select>
+        </label>
+        <div id="cSerieResumo" class="resumo"></div>
 
         <hr>
         <h3>Timbre</h3>
@@ -143,7 +167,7 @@
       <ul id="listaRelacoes"></ul>
       <div class="dica">
         1ª camada selecionada = <b>referência</b>; as demais = <b>dependentes</b>.
-        Os valores mostram o alvo; o "atingido" é recalculado ao editar ou ao tocar.
+        Os valores mostram o alvo; o "atingido" (com ajustes) é recalculado ao editar ou ao tocar.
       </div>
     </section>
 
@@ -172,7 +196,6 @@
     </section>
   </aside>
 
-  <!-- ============ ÁREA PRINCIPAL ============ -->
   <main id="area">
     <div id="transporte">
       <button id="btnPlay" title="Tocar (Espaço)">▶</button>
@@ -188,15 +211,15 @@
     </div>
     <div id="automacoes">
       <div class="faixa" data-tipo="dinamica">
-        <div class="faixaLabel">Dinâmica</div>
+        <div class="faixaLabel" title="Dinâmica">Din.</div>
         <canvas class="faixaCanvas"></canvas>
       </div>
       <div class="faixa" data-tipo="panorama">
-        <div class="faixaLabel">Panorama</div>
+        <div class="faixaLabel" title="Panorama">Pan.</div>
         <canvas class="faixaCanvas"></canvas>
       </div>
       <div class="faixa" data-tipo="reverb">
-        <div class="faixaLabel">Reverb</div>
+        <div class="faixaLabel" title="Reverb">Rev.</div>
         <canvas class="faixaCanvas"></canvas>
       </div>
     </div>

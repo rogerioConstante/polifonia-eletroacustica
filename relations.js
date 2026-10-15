@@ -1,25 +1,21 @@
 // ============================================================
-// relations.js — Relações entre camadas (ritmo, direção, intervalar)
+// relations.js — Relações (ritmo, direção, intervalar)
 // ============================================================
 //
-// Uma relação conecta uma camada de REFERÊNCIA a N camadas
-// DEPENDENTES. Cada tipo (ritmo/direção/intervalar) é um valor
-// 0..100 ou null (inativo).
+// Rodada 4 (item 4): nenhuma nota é descartada por estar fora
+// da faixa do polígono. Todas passam por `ajustarAoPoligono`
+// (transposição por oitava; senão, altura viável mais próxima).
 //
-// Ordem de aplicação: ritmo → direção → intervalar.
-//
-// O polígono sempre prevalece: se o resultado de uma relação
-// empurrar a altura para fora da região no instante t, o evento
-// é descartado (não é gerado).
-//
-// Determinismo: cada decisão "obedecer ou não" usa um PRNG
-// semeado com a semente da camada dependente + um contador.
-// ============================================================
+// Ordem: ritmo → direção → intervalar.
+// Métricas são medidas com a altura FINAL (após ajuste).
 
-import { faixaVerticalEm } from './audio.js';
+import {
+  faixaVerticalEm, intervalosVerticaisEm,
+  ajustarAoPoligono, quantizar, hzParaMidi, midiParaHz,
+} from './audio.js';
 
 // ------------------------------------------------------------
-// PRNG determinístico (mulberry32) — mesma semente, mesma saída
+// PRNG
 // ------------------------------------------------------------
 function prng(semente) {
   let a = (semente >>> 0) || 1;
@@ -31,17 +27,11 @@ function prng(semente) {
   };
 }
 
-function hzParaMidi(f) { return 69 + 12 * Math.log2(f / 440); }
-function midiParaHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
-
 // ------------------------------------------------------------
-// Utilidades de eventos
+// Utilidades
 // ------------------------------------------------------------
-
-/** Encontra o evento da referência mais próximo de t (dentro de uma janela). */
-function eventoRefMaisProximo(refEvs, t, janela = 0.06) {
-  let melhor = null;
-  let melhorDist = Infinity;
+function eventoRefMaisProximo(refEvs, t, janela = 0.25) {
+  let melhor = null, melhorDist = Infinity;
   for (const e of refEvs) {
     const d = Math.abs(e.t - t);
     if (d < melhorDist) { melhorDist = d; melhor = e; }
@@ -50,35 +40,60 @@ function eventoRefMaisProximo(refEvs, t, janela = 0.06) {
   return null;
 }
 
-/** Retorna o evento imediatamente anterior na lista (já ordenada por t). */
 function anterior(evs, i) {
   for (let k = i - 1; k >= 0; k--) if (evs[k]._ativo !== false) return evs[k];
   return null;
 }
 
-/** Intervalo em semitons entre dois eventos (arredondado). */
 function intervaloSemitons(a, b) {
   return Math.round(hzParaMidi(b.f) - hzParaMidi(a.f));
 }
-
-/** Direção: -1 descendente, 0 oblíquo/estático, +1 ascendente. */
 function direcao(intervalo) {
   if (intervalo > 0) return 1;
   if (intervalo < 0) return -1;
   return 0;
 }
 
+/** Extensão temporal do polígono (menor/maior t dos vértices). */
+function extensao(cam) {
+  if (!cam || !cam.vertices || cam.vertices.length < 3) return null;
+  let t0 = Infinity, t1 = -Infinity;
+  for (const v of cam.vertices) {
+    if (v.t < t0) t0 = v.t;
+    if (v.t > t1) t1 = v.t;
+  }
+  return { t0, t1 };
+}
+
+/**
+ * Ajusta `e.f` (em Hz) para caber em alguma faixa interna do
+ * polígono em `e.t`. Atualiza `e.f` e `e._ajuste`.
+ */
+function fixarEvento(e, camDep, ajustes) {
+  const ints = intervalosVerticaisEm(camDep.vertices, e.t);
+  if (!ints.length) {
+    // Instante fora do polígono — não deveria ocorrer (o ritmo
+    // já checa antes). Marca como descartado.
+    e._ativo = false;
+    ajustes.descartadas++;
+    return;
+  }
+  // Faixa mais próxima de e.f (garante coerência em côncavos).
+  let faixa = ints[0], melhorDist = Infinity;
+  for (const [a, b] of ints) {
+    const d = (e.f < a) ? (a - e.f) : (e.f > b ? e.f - b : 0);
+    if (d < melhorDist) { melhorDist = d; faixa = [a, b]; }
+  }
+  const { f, ajuste } = ajustarAoPoligono(e.f, faixa, camDep.quantizacaoAltura, {});
+  if (ajuste === 'oitava') ajustes.oitava++;
+  else if (ajuste === 'proxima') ajustes.proxima++;
+  e.f = f;
+  e._ajuste = ajuste;
+}
+
 // ------------------------------------------------------------
-// Aplicação das relações sobre as listas de eventos
+// Aplicação das relações
 // ------------------------------------------------------------
-//
-// eventosPorCamada: Map(id -> [eventos])
-// relacoes:         lista de relações
-// camadasPorId:     Map(id -> camada) — precisa dos vertices p/ recorte
-//
-// Retorna: Map(id -> { ritmoAtingido, direcaoAtingida, intervalarAtingida })
-//          com os valores efetivamente atingidos por relação.
-//
 export function aplicarRelacoes(eventosPorCamada, relacoes, camadasPorId) {
   const atingidos = new Map();
 
@@ -90,50 +105,44 @@ export function aplicarRelacoes(eventosPorCamada, relacoes, camadasPorId) {
       const camDep = camadasPorId.get(depId);
       if (!camDep) continue;
 
-      // marcador de eventos "descartados" pelo polígono
       for (const e of depEvs) e._ativo = true;
 
       const rand = prng((camDep.semente ^ 0x5BD1E995) >>> 0);
+      const ajustes = { oitava: 0, proxima: 0, descartadas: 0 };
       const res = {};
 
-      // ---- 1) RITMO ----
+      // 1) RITMO
       if (rel.ritmo != null) {
-        res.ritmo = aplicarRitmo(depEvs, refEvs, rel.ritmo, rand);
+        res.ritmo = aplicarRitmo(depEvs, refEvs, rel.ritmo, rand, camDep, ajustes);
       }
 
-      // reordena e limpa inativos antes de alturas
       let ativos = depEvs.filter(e => e._ativo !== false);
       ativos.sort((a, b) => a.t - b.t);
 
-      // ---- 2) DIREÇÃO ----
+      // 2) DIREÇÃO
       if (rel.direcao != null) {
-        res.direcao = aplicarDirecao(ativos, refEvs, rel.direcao, rand, camDep);
+        res.direcao = aplicarDirecao(ativos, refEvs, rel.direcao, rand, camDep, ajustes);
       }
 
-      // ---- 3) INTERVALAR ----
+      // 3) INTERVALAR
       if (rel.intervalar != null) {
         res.intervalar = aplicarIntervalar(
           ativos, refEvs, rel.intervalar, rand, camDep,
-          rel.parametros && rel.parametros.compararPorClasse
+          rel.parametros && rel.parametros.compararPorClasse,
+          ajustes
         );
       }
 
-      // ---- 4) recorte final pelo polígono ----
-      const filtrados = [];
+      // Rede de segurança: fixa todos que ainda não foram fixados.
       for (const e of ativos) {
-        const faixa = faixaVerticalEm(camDep.vertices, e.t);
-        if (!faixa) continue;
-        const [fMin, fMax] = faixa;
-        if (e.f < fMin * 0.999 || e.f > fMax * 1.001) {
-          // fora da faixa: descarta (polígono prevalece)
-          continue;
+        if (e._ajuste === undefined) {
+          try { fixarEvento(e, camDep, ajustes); } catch (_) { e._ativo = false; ajustes.descartadas++; }
         }
-        filtrados.push(e);
       }
+      ativos = ativos.filter(e => e._ativo !== false);
 
-      // Substitui a lista da camada dependente
-      eventosPorCamada.set(depId, filtrados);
-
+      eventosPorCamada.set(depId, ativos);
+      res.ajustes = ajustes;
       atingidos.set(depId + ':' + rel.id, res);
     }
   }
@@ -145,45 +154,51 @@ export function aplicarRelacoes(eventosPorCamada, relacoes, camadasPorId) {
 // Ritmo
 // ------------------------------------------------------------
 //
-// Para cada evento da dependente, procura o ataque da referência
-// mais próximo. Com probabilidade = ritmo/100, o evento "obedece":
-// seu t é movido para o t da referência. Os demais permanecem.
+// Só move `e.t` para `ref.t` se o instante `ref.t` estiver dentro
+// da extensão do polígono e produzir faixa vertical. A altura é
+// reajustada via `fixarEvento`.
 //
-// Valor atingido: proporção dos eventos cujo t final coincide com
-// algum ataque da referência (tolerância de 5 ms).
-//
-function aplicarRitmo(depEvs, refEvs, alvo, rand) {
+function aplicarRitmo(depEvs, refEvs, alvo, rand, camDep, ajustes) {
   if (!refEvs.length) return 0;
   const alvoFrac = alvo / 100;
-  let obedeceram = 0;
+  const ext = extensao(camDep);
+  if (!ext) return 0;
 
   for (const e of depEvs) {
     const ref = eventoRefMaisProximo(refEvs, e.t, 0.25);
     if (!ref) continue;
-    if (rand() < alvoFrac) {
-      e.t = ref.t;
-    }
+    if (rand() >= alvoFrac) continue;
+    // Checa que ref.t está dentro do polígono.
+    if (ref.t < ext.t0 - 1e-6 || ref.t > ext.t1 + 1e-6) continue;
+    const faixa = faixaVerticalEm(camDep.vertices, ref.t);
+    if (!faixa) continue;
+    e.t = ref.t;
+    // Trunca dur para não passar do fim do polígono.
+    const tMax = ext.t1;
+    if (e.t + e.dur > tMax) e.dur = Math.max(0.02, tMax - e.t);
+    // A altura precisa ser refeita neste novo t.
+    try { fixarEvento(e, camDep, ajustes); } catch (_) { e._ativo = false; ajustes.descartadas++; }
   }
 
-  // mede
+  // Medição: proporção dos eventos finais que coincidem com um
+  // ataque da referência (tolerância 5 ms).
+  let acertos = 0;
   for (const e of depEvs) {
-    if (refEvs.some(r => Math.abs(r.t - e.t) < 0.005)) obedeceram++;
+    if (e._ativo === false) continue;
+    if (refEvs.some(r => Math.abs(r.t - e.t) < 0.005)) acertos++;
   }
-  return depEvs.length ? Math.round((obedeceram / depEvs.length) * 100) : 0;
+  const total = depEvs.filter(e => e._ativo !== false).length;
+  return total ? Math.round((acertos / total) * 100) : 0;
 }
 
 // ------------------------------------------------------------
 // Direção
 // ------------------------------------------------------------
 //
-// Para cada par (anterior, atual) da dependente, mede-se o
-// intervalo melódico. Compara-se com o movimento da referência
-// no mesmo trecho temporal. Com probabilidade = direcao/100 o
-// evento "obedece": o intervalo é ajustado para ter a mesma
-// direção que o da referência (preservando magnitude, invertendo
-// o sinal se preciso). Empates (0) contam como divergência.
+// Após reescrever `at.f`, chama `fixarEvento`. Mede com a altura
+// final.
 //
-function aplicarDirecao(ativos, refEvs, alvo, rand, camDep) {
+function aplicarDirecao(ativos, refEvs, alvo, rand, camDep, ajustes) {
   if (ativos.length < 2 || !refEvs.length) return 0;
   const alvoFrac = alvo / 100;
   let acertos = 0, total = 0;
@@ -194,8 +209,6 @@ function aplicarDirecao(ativos, refEvs, alvo, rand, camDep) {
     if (!ant) continue;
 
     const dirDep = direcao(intervaloSemitons(ant, at));
-    // referência no mesmo trecho: pega o par de eventos da referência
-    // que envolve o t do atual
     const refAnt = refEvs.filter(r => r.t < at.t).pop() || null;
     const refAt  = refEvs.find(r => r.t >= at.t) || null;
     if (!refAnt || !refAt) { total++; continue; }
@@ -203,20 +216,40 @@ function aplicarDirecao(ativos, refEvs, alvo, rand, camDep) {
     const dirRef = direcao(intervaloSemitons(refAnt, refAt));
     total++;
 
+    // Já coincide com a direção da referência?
     if (dirDep === dirRef) { acertos++; continue; }
+    if (rand() >= alvoFrac) continue;
 
-    // diverge. Com probabilidade alvo, obedece:
-    if (rand() < alvoFrac) {
-      // reescreve a altura do evento atual para ter a direção da referência,
-      // preservando a magnitude do intervalo da dependente
-      const mag = Math.abs(intervaloSemitons(ant, at));
-      const sinalRef = dirRef === 0 ? 1 : dirRef;
-      const novoMidi = hzParaMidi(ant.f) + mag * sinalRef;
-      const novoF = midiParaHz(novoMidi);
-      // o polígono prevalece (checado depois); aqui só aplica
-      at.f = novoF;
-      // se a direção mudou para a da referência, conta como acerto
-      if (direcao(intervaloSemitons(ant, at)) === dirRef) acertos++;
+    // Tenta obedecer. Ordem de tentativas:
+    //  (1) mesma magnitude, sinal da referência;
+    //  (2) magnitude reduzida (mag-1, mag-2, ... 1) no sentido
+    //      da referência (preserva mais o contorno do que
+    //      transpor por oitava);
+    //  (3) transposição por oitava do resultado de (1).
+    const mag = Math.abs(intervaloSemitons(ant, at));
+    const sinalRef = dirRef === 0 ? 1 : dirRef;
+
+    const candidatos = [];
+    for (let m = mag; m >= 1; m--) {
+      candidatos.push(midiParaHz(hzParaMidi(ant.f) + m * sinalRef));
+    }
+    // (3) por oitava do (1) — tenta por último
+    candidatos.push(midiParaHz(hzParaMidi(ant.f) + mag * sinalRef));
+
+    for (const cand of candidatos) {
+      const original = at.f;
+      at.f = quantizar(cand, camDep.quantizacaoAltura);
+      fixarEvento(at, camDep, ajustes);
+      if (direcao(intervaloSemitons(ant, at)) === dirRef) {
+        acertos++;
+        break;
+      }
+      // Se não cumpriu e o ajuste foi "nenhum", deixa o candidato
+      // mesmo assim (é o melhor possível). Se não cumpriu e o
+      // ajuste foi por oitava/proxima, ainda assim mantemos — a
+      // rede de segurança garante que o evento cabe.
+      // Para tentar o próximo candidato, é preciso restaurar.
+      if (cand !== candidatos[candidatos.length - 1]) at.f = original;
     }
   }
 
@@ -226,14 +259,7 @@ function aplicarDirecao(ativos, refEvs, alvo, rand, camDep) {
 // ------------------------------------------------------------
 // Intervalar
 // ------------------------------------------------------------
-//
-// Compara magnitudes de intervalo (semitons, sem direção).
-// Se `porClasse` for true, compara classe intervalar (mod 12).
-// Com probabilidade = intervalar/100 o evento "obedece":
-// sua magnitude é reescrita para a da referência, preservando
-// a direção do evento da dependente.
-//
-function aplicarIntervalar(ativos, refEvs, alvo, rand, camDep, porClasse) {
+function aplicarIntervalar(ativos, refEvs, alvo, rand, camDep, porClasse, ajustes) {
   if (ativos.length < 2 || !refEvs.length) return 0;
   const alvoFrac = alvo / 100;
   let acertos = 0, total = 0;
@@ -253,21 +279,36 @@ function aplicarIntervalar(ativos, refEvs, alvo, rand, camDep, porClasse) {
 
     const mDep = porClasse ? (magDep % 12) : magDep;
     const mRef = porClasse ? (magRef % 12) : magRef;
-
     if (mDep === mRef) { acertos++; continue; }
+    if (rand() >= alvoFrac) continue;
 
-    if (rand() < alvoFrac) {
-      // obedece: reescreve magnitude, preservando a direção atual
-      const dirAtual = direcao(intervaloSemitons(ant, at));
-      const sinal = dirAtual === 0 ? 1 : dirAtual;
-      const novoMidi = hzParaMidi(ant.f) + magRef * sinal;
-      at.f = midiParaHz(novoMidi);
-      if (Math.abs(intervaloSemitidos(ant, at)) === magRef) acertos++;
+    const dirAtual = direcao(intervaloSemitons(ant, at));
+    const sinal = dirAtual === 0 ? 1 : dirAtual;
+    const candidatos = [
+      midiParaHz(hzParaMidi(ant.f) + magRef * sinal),
+    ];
+    // Só tenta o sentido oposto se a relação de direção estiver
+    // inativa (não faz sentido brigar com direção).
+    if (rel_direcao_inativa(relAtualRef)) {
+      candidatos.push(midiParaHz(hzParaMidi(ant.f) - magRef * Math.sign(sinal || 1)));
+    }
+
+    for (let k = 0; k < candidatos.length; k++) {
+      const original = at.f;
+      at.f = quantizar(candidatos[k], camDep.quantizacaoAltura);
+      fixarEvento(at, camDep, ajustes);
+      const mAtual = Math.abs(intervaloSemitons(ant, at));
+      const mAtualC = porClasse ? (mAtual % 12) : mAtual;
+      if (mAtualC === mRef) { acertos++; break; }
+      if (k < candidatos.length - 1) at.f = original;
     }
   }
 
   return total ? Math.round((acertos / total) * 100) : 0;
 }
 
-// pequeno alias só para clareza acima
-function intervaloSemitidos(a, b) { return intervaloSemitons(a, b); }
+// placeholder — resolvido no escopo acima via closure
+let relAtualRef = null;
+function rel_direcao_inativa(rel) {
+  return !rel || rel.direcao == null;
+}

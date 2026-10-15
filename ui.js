@@ -6,12 +6,12 @@ import {
   estado, pushUndo, undo, redo, criarCamada, camadaPorId,
   camadaSelecionada, estaSelecionada, uid, timbrePadrao,
   pontoAutomacao, criarRelacaoDaSelecao, removerRelacao,
-  normalizarEnvelope,
+  normalizarEnvelope, extensaoTemporal,
 } from './model.js';
 import {
   initView, marcarRender, tamanhoCanvas, tParaX, xParaT,
   fParaY, yParaF, midiParaHz, hzParaMidi, estadoAutomacao,
-  automacaoHitTest, valorParaY, yParaValor,
+  automacaoHitTest, valorParaY, yParaValor, CALHA_PX,
 } from './view.js';
 import {
   baixarProjeto, abrirProjetoDialogo, novoProjeto,
@@ -21,6 +21,7 @@ import {
   motor, tocarSomenteSelecionada, valoresAtingidos, recalcularAtingidos,
 } from './audio.js';
 import { exportarWAV } from './export.js';
+import { parseSerie, resumoSerie } from './serie.js';
 
 let canvas;
 
@@ -37,6 +38,7 @@ export function initUI(canvasEl) {
   ligarPainelProjeto();
   ligarPainelCamada();
   ligarPainelEnvelope();
+  ligarPainelSerie();
   ligarPainelRelacoes();
   ligarMouse();
   ligarAutomacoes();
@@ -45,7 +47,7 @@ export function initUI(canvasEl) {
   ligarTransporte();
   ligarExportacao();
 
-  // Quando a música termina sozinha, o motor chama este callback.
+  motor._onFrame = marcarRender;
   motor._onFim = () => {
     const btnPlay = document.getElementById('btnPlay');
     if (btnPlay) btnPlay.textContent = '▶';
@@ -53,6 +55,17 @@ export function initUI(canvasEl) {
     if (fill) fill.style.width = '0%';
     setStatus('fim');
     marcarRender();
+  };
+
+  window.__rolarParaTempo = (t) => {
+    if (typeof t !== 'number' || !isFinite(t)) return;
+    const larguraUtil = tamanhoCanvas().W - CALHA_PX;
+    const visivelIni = estado.scrollX;
+    const visivelFim = estado.scrollX + larguraUtil / estado.zoomX;
+    if (t < visivelIni || t > visivelFim - 0.5) {
+      estado.scrollX = Math.max(0, t - 0.5);
+      marcarRender();
+    }
   };
 
   iniciarAutosave();
@@ -75,9 +88,12 @@ function ligarTransporte() {
         motor.pausar();
         btnPlay.textContent = '▶';
         setStatus('pausado');
+      } else if (motor.pausado) {
+        await motor.retomar();
+        btnPlay.textContent = '⏸';
+        setStatus('tocando');
       } else {
-        const de = motor.pausado ? motor.tempoAtual() : 0;
-        await motor.play(de, {});
+        await motor.play(0, {});
         btnPlay.textContent = '⏸';
         setStatus('tocando');
       }
@@ -90,10 +106,7 @@ function ligarTransporte() {
     try {
       const cam = camadaSelecionada();
       if (!cam) return;
-      if (motor.tocando) {
-        motor.pausar();
-        btnPlay.textContent = '▶';
-      }
+      if (motor.tocando || motor.pausado) motor.parar();
       const ok = await tocarSomenteSelecionada();
       if (ok) {
         btnPlay.textContent = '⏸';
@@ -123,15 +136,12 @@ function atualizarBotaoCamada() {
 }
 
 // ------------------------------------------------------------
-// Faixas de automação: edição de pontos
+// Faixas de automação
 // ------------------------------------------------------------
 function ligarAutomacoes() {
   const cont = document.getElementById('automacoes');
   if (!cont) return;
-
   cont.addEventListener('mousedown', onAutomacaoMouseDown);
-  cont.addEventListener('mousemove', onAutomacaoMouseMove);
-  cont.addEventListener('mouseup',   onAutomacaoMouseUp);
   cont.addEventListener('dblclick',  onAutomacaoDblClick);
   cont.addEventListener('contextmenu', e => {
     const cv = e.target.closest('.faixaCanvas');
@@ -139,11 +149,11 @@ function ligarAutomacoes() {
     e.preventDefault();
     const { x, y } = posNoCanvas(cv, e);
     const hit = automacaoHitTest(cv, x, y);
-    if (hit && hit.idx >= 0) removerPontoAutomacao(hit.tipo, hit.idx);
+    if (hit && hit.idx >= 0) removerPontoAutomacao(hit.tipo, hit.ponto);
   });
-  cont.addEventListener('mouseleave', () => {
-    estadoAutomacao.arrasto = null;
-  });
+  // 1c: arrasto sobrevive fora do contêiner
+  window.addEventListener('mousemove', onAutomacaoMouseMove);
+  window.addEventListener('mouseup',   onAutomacaoMouseUp);
 }
 
 function posNoCanvas(cv, e) {
@@ -164,24 +174,32 @@ function onAutomacaoMouseDown(e) {
   const hit = automacaoHitTest(cv, x, y);
   if (hit && hit.idx >= 0) {
     pushUndo();
-    estadoAutomacao.selecionada = { camId: cam.id, tipo, idx: hit.idx };
-    estadoAutomacao.arrasto = { camId: cam.id, tipo, idx: hit.idx };
+    estadoAutomacao.selecionada = { camId: cam.id, tipo, ponto: hit.ponto };
+    estadoAutomacao.arrasto = { camId: cam.id, tipo, ponto: hit.ponto };
     marcarRender();
     return;
   }
 
   if (e.shiftKey) return;
 
-  const t = Math.max(0, xParaT(x + 89)); // 89 = CALHA_PX (ver view.js)
+  const t = Math.max(0, xParaT(x + CALHA_PX));
+
+  // 1b: recusa criar fora do intervalo do polígono
+  const ext = extensaoTemporal(cam);
+  if (ext && (t < ext.t0 - 1e-6 || t > ext.t1 + 1e-6)) {
+    setStatus('fora do intervalo do polígono');
+    return;
+  }
+
   const v = yParaValor(y, h);
   pushUndo();
   const pts = cam.automacoes[tipo] || [];
-  pts.push(pontoAutomacao(t, v, 'linear'));
+  const novo = pontoAutomacao(t, v, 'linear');
+  pts.push(novo);
   pts.sort((a, b) => a.t - b.t);
   cam.automacoes[tipo] = pts;
-  const idx = pts.findIndex(p => p.t === t && p.v === v);
-  estadoAutomacao.selecionada = { camId: cam.id, tipo, idx };
-  estadoAutomacao.arrasto = { camId: cam.id, tipo, idx };
+  estadoAutomacao.selecionada = { camId: cam.id, tipo, ponto: novo };
+  estadoAutomacao.arrasto = { camId: cam.id, tipo, ponto: novo };
   marcarRender();
 }
 
@@ -195,11 +213,18 @@ function onAutomacaoMouseMove(e) {
   if (!cv) return;
   const { x, y } = posNoCanvas(cv, e);
   const h = cv.getBoundingClientRect().height;
-  const pts = cam.automacoes[arr.tipo];
-  const p = pts[arr.idx];
+  const p = arr.ponto;
   if (!p) return;
-  p.t = Math.max(0, xParaT(x + 89));
+
+  const ext = extensaoTemporal(cam);
+  let t = Math.max(0, xParaT(x + CALHA_PX));
+  if (ext) t = Math.min(Math.max(t, ext.t0), ext.t1);
+  p.t = t;
   p.v = yParaValor(y, h);
+
+  // 1c: reordena a cada movimento
+  const pts = cam.automacoes[arr.tipo];
+  pts.sort((a, b) => a.t - b.t);
   marcarRender();
 }
 
@@ -224,20 +249,18 @@ function onAutomacaoDblClick(e) {
   const { x, y } = posNoCanvas(cv, e);
   const hit = automacaoHitTest(cv, x, y);
   if (!hit || hit.idx < 0) return;
-  const tipo = hit.tipo;
-  const pts = cam.automacoes[tipo];
-  const p = pts[hit.idx];
-  if (!p) return;
   pushUndo();
-  p.curva = (p.curva === 'suave') ? 'linear' : 'suave';
+  hit.ponto.curva = (hit.ponto.curva === 'suave') ? 'linear' : 'suave';
   marcarRender();
 }
 
-function removerPontoAutomacao(tipo, idx) {
+function removerPontoAutomacao(tipo, ponto) {
   const cam = camadaSelecionada();
   if (!cam) return;
   const pts = cam.automacoes[tipo];
-  if (!pts || !pts[idx]) return;
+  if (!pts) return;
+  const idx = pts.indexOf(ponto);
+  if (idx < 0) return;
   pushUndo();
   pts.splice(idx, 1);
   estadoAutomacao.selecionada = null;
@@ -246,7 +269,7 @@ function removerPontoAutomacao(tipo, idx) {
 }
 
 // ------------------------------------------------------------
-// Snap de altura
+// Snap
 // ------------------------------------------------------------
 function snapAltura(f) {
   if (!estado.snapAltura) return f;
@@ -275,7 +298,7 @@ function setFerramenta(f) {
 }
 
 // ------------------------------------------------------------
-// Mouse
+// Mouse (gráfico)
 // ------------------------------------------------------------
 let arrasto = null;
 
@@ -296,7 +319,7 @@ function posMouse(e) {
 function onMouseDown(e) {
   if (e.button !== 0) return;
   const { x, y } = posMouse(e);
-  if (x < 89) return; // calha
+  if (x < CALHA_PX) return;
   const t = xParaT(x);
   const f = yParaF(y);
 
@@ -330,8 +353,15 @@ function onMouseDown(e) {
     } else {
       estado.selecao = [cam.id];
       pushUndo();
+      // 1a: guarda cópia dos t das automações para deslocamento conjunto
+      const origAuto = {
+        dinamica: (cam.automacoes.dinamica || []).map(p => ({ obj: p, t: p.t })),
+        panorama: (cam.automacoes.panorama || []).map(p => ({ obj: p, t: p.t })),
+        reverb:   (cam.automacoes.reverb   || []).map(p => ({ obj: p, t: p.t })),
+      };
       arrasto = { tipo: 'camada', id: cam.id, t0: t, f0: f,
-                  orig: cam.vertices.map(v => ({ ...v })) };
+                  orig: cam.vertices.map(v => ({ ...v })),
+                  origAuto };
     }
     atualizarPainel();
     marcarRender();
@@ -352,11 +382,30 @@ function onMouseMove(e) {
   if (arrasto.tipo === 'vertice') {
     cam.vertices[arrasto.idx] = { t: Math.max(0, xParaT(x)), f: snapAltura(yParaF(y)) };
   } else if (arrasto.tipo === 'camada') {
-    const dt = xParaT(x) - arrasto.t0;
+    let dt = xParaT(x) - arrasto.t0;
     const df = yParaF(y) / arrasto.f0;
+
+    // 1a: dt global (não deforma o polígono ao encostar em t = 0).
+    let minT = Infinity;
+    for (const v of arrasto.orig) if (v.t < minT) minT = v.t;
+    for (const lista of Object.values(arrasto.origAuto)) {
+      for (const { t: tOrig } of lista) if (tOrig < minT) minT = tOrig;
+    }
+    dt = Math.max(dt, -minT);
+
     for (let i = 0; i < cam.vertices.length; i++) {
-      cam.vertices[i].t = Math.max(0, arrasto.orig[i].t + dt);
+      cam.vertices[i].t = arrasto.orig[i].t + dt;
       cam.vertices[i].f = arrasto.orig[i].f * df;
+    }
+    for (const lista of Object.values(arrasto.origAuto)) {
+      for (const { obj, t: tOrig } of lista) {
+        obj.t = Math.max(0, tOrig + dt);
+      }
+      // mantém ordenado
+      const tipo = Object.keys(arrasto.origAuto).find(k => arrasto.origAuto[k] === lista);
+      if (tipo && cam.automacoes[tipo]) {
+        cam.automacoes[tipo].sort((a, b) => a.t - b.t);
+      }
     }
   }
   marcarRender();
@@ -389,7 +438,7 @@ function onWheel(e) {
     const delta = e.deltaY * 0.002;
     estado.fMin *= Math.pow(2, delta);
   } else {
-    estado.scrollX += e.deltaY * 0.002 * ((tamanhoCanvas().W - 89) / estado.zoomX);
+    estado.scrollX += e.deltaY * 0.002 * ((tamanhoCanvas().W - CALHA_PX) / estado.zoomX);
     estado.scrollX = Math.max(0, estado.scrollX);
   }
   marcarRender();
@@ -416,7 +465,7 @@ function fecharPoligono() {
 }
 
 // ------------------------------------------------------------
-// Hit-test de polígono
+// Hit-test
 // ------------------------------------------------------------
 function camadaNoPonto(t, f) {
   const cams = [...estado.projeto.camadas].reverse();
@@ -448,7 +497,7 @@ function ligarTeclado() {
 
     if (e.key === 'Delete' || e.key === 'Backspace') {
       const sel = estadoAutomacao.selecionada;
-      if (sel) { removerPontoAutomacao(sel.tipo, sel.idx); return; }
+      if (sel && sel.ponto) { removerPontoAutomacao(sel.tipo, sel.ponto); return; }
       excluirSelecao();
       return;
     }
@@ -497,6 +546,10 @@ function duplicarSelecao() {
     copia.id = uid();
     copia.nome = cam.nome + ' (cópia)';
     copia.vertices = copia.vertices.map(v => ({ t: v.t + 0.5, f: v.f }));
+    // 1a: deslocar também as automações
+    for (const tipo of ['dinamica','panorama','reverb']) {
+      copia.automacoes[tipo] = (copia.automacoes[tipo] || []).map(p => ({ ...p, t: p.t + 0.5 }));
+    }
     estado.projeto.camadas.push(copia);
     novas.push(copia.id);
   }
@@ -514,7 +567,7 @@ function ligarBotoesZoom() {
   document.getElementById('btnZoomVMenos').onclick = () => { estado.zoomY = Math.max(20, estado.zoomY / 1.15); marcarRender(); };
   document.getElementById('btnFit').onclick = () => {
     estado.scrollX = 0;
-    estado.zoomX = (tamanhoCanvas().W - 89) / estado.projeto.duracaoTotal;
+    estado.zoomX = (tamanhoCanvas().W - CALHA_PX) / estado.projeto.duracaoTotal;
     estado.zoomY = tamanhoCanvas().H / estado.oitavasVisiveis;
     marcarRender();
   };
@@ -576,6 +629,8 @@ function ligarPainelCamada() {
 
   for (const [id, aplicar] of Object.entries(camposSimples)) {
     const el = document.getElementById(id);
+    el.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
+    el.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
     el.addEventListener('input', () => {
       const cam = camadaSelecionada();
       if (!cam) return;
@@ -587,14 +642,12 @@ function ligarPainelCamada() {
       if (id === 'cDens') atualizarResumoRitmo();
       atualizarLista(); marcarRender();
     });
-    el.addEventListener('change', () => {
-      if (camadaSelecionada()) pushUndo();
-    });
   }
 
   const cPulso = document.getElementById('cPulso');
   const cBpm = document.getElementById('cBpm');
-
+  cPulso.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
+  cPulso.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   cPulso.addEventListener('input', () => {
     const cam = camadaSelecionada();
     if (!cam) return;
@@ -604,8 +657,8 @@ function ligarPainelCamada() {
     cBpm.value = cam.andamento;
     atualizarResumoRitmo();
   });
-  cPulso.addEventListener('change', () => { if (camadaSelecionada()) pushUndo(); });
-
+  cBpm.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
+  cBpm.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   cBpm.addEventListener('input', () => {
     const cam = camadaSelecionada();
     if (!cam) return;
@@ -615,9 +668,9 @@ function ligarPainelCamada() {
     cPulso.value = cam.pulso.toFixed(3);
     atualizarResumoRitmo();
   });
-  cBpm.addEventListener('change', () => { if (camadaSelecionada()) pushUndo(); });
 
   const elPad = document.getElementById('cPadraoRitmico');
+  elPad.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
   elPad.addEventListener('change', () => {
     const cam = camadaSelecionada();
     if (!cam) return;
@@ -626,21 +679,17 @@ function ligarPainelCamada() {
       .filter(s => s !== '')
       .map(s => (s === '1' || s === '0') ? +s : null)
       .filter(v => v !== null);
-    if (!arr.length) {
-      elPad.value = cam.padraoRitmico.join(',');
-      return;
-    }
-    pushUndo();
+    if (!arr.length) { elPad.value = cam.padraoRitmico.join(','); return; }
     cam.padraoRitmico = arr;
     elPad.value = arr.join(',');
     atualizarResumoRitmo();
   });
 
   const selQ = document.getElementById('cQuant');
+  selQ.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   selQ.addEventListener('change', () => {
     const cam = camadaSelecionada();
     if (!cam) return;
-    pushUndo();
     const modo = selQ.value;
     if (modo === 'conjunto') {
       const classes = cam.quantizacaoAltura.classes || [0,2,4,5,7,9,11];
@@ -660,10 +709,10 @@ function ligarPainelCamada() {
   };
 
   const selT = document.getElementById('cTimbre');
+  selT.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   selT.addEventListener('change', () => {
     const cam = camadaSelecionada();
     if (!cam) return;
-    pushUndo();
     cam.timbre = timbrePadrao(selT.value);
     renderizarTimbre(cam);
     marcarRender();
@@ -671,7 +720,7 @@ function ligarPainelCamada() {
 }
 
 // ------------------------------------------------------------
-// Painel: parâmetros do timbre (RESTAURADA)
+// Painel: Timbre
 // ------------------------------------------------------------
 function renderizarTimbre(cam) {
   const box = document.getElementById('timbreParams');
@@ -687,10 +736,10 @@ function renderizarTimbre(cam) {
     inp.id = id;
     inp.min = min; inp.max = max; inp.step = step;
     inp.value = valor;
+    inp.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
     inp.addEventListener('change', () => {
       const cam2 = camadaSelecionada();
       if (!cam2) return;
-      pushUndo();
       cam2.timbre[id] = +inp.value;
     });
     l.appendChild(inp);
@@ -721,6 +770,7 @@ function ligarPainelEnvelope() {
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
+    el.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
     el.addEventListener('input', () => {
       const cam = camadaSelecionada();
       if (!cam) return;
@@ -738,7 +788,6 @@ function ligarPainelEnvelope() {
       document.getElementById('envR').value = cam.envelope.r.toFixed(1);
       renderizarEnvelope(cam.envelope);
     });
-    el.addEventListener('change', () => { if (camadaSelecionada()) pushUndo(); });
   }
 }
 
@@ -758,10 +807,7 @@ function renderizarEnvelope(env) {
   c.fillRect(0, 0, w, h);
   c.strokeStyle = 'rgba(255,255,255,0.06)';
   c.beginPath();
-  for (let i = 1; i < 5; i++) {
-    const x = (w * i) / 5;
-    c.moveTo(x, 0); c.lineTo(x, h);
-  }
+  for (let i = 1; i < 5; i++) { const x = (w * i) / 5; c.moveTo(x, 0); c.lineTo(x, h); }
   c.stroke();
 
   const a = Math.max(0, env.a) / 100;
@@ -769,22 +815,14 @@ function renderizarEnvelope(env) {
   const s = Math.max(0, env.s) / 100;
   const sus = Math.max(0, Math.min(1, env.nivelSustain));
 
-  const xa = a * w;
-  const xd = (a + d) * w;
-  const xs = (a + d + s) * w;
-  const xr = w;
-  const yTop = 4;
-  const yBase = h - 4;
+  const xa = a * w, xd = (a + d) * w, xs = (a + d + s) * w, xr = w;
+  const yTop = 4, yBase = h - 4;
   const yS = yBase - (yBase - yTop) * sus;
 
   c.strokeStyle = '#4a7fb5';
   c.lineWidth = 1.6;
   c.beginPath();
-  c.moveTo(0, yBase);
-  c.lineTo(xa, yTop);
-  c.lineTo(xd, yS);
-  c.lineTo(xs, yS);
-  c.lineTo(xr, yBase);
+  c.moveTo(0, yBase); c.lineTo(xa, yTop); c.lineTo(xd, yS); c.lineTo(xs, yS); c.lineTo(xr, yBase);
   c.stroke();
 
   c.fillStyle = 'rgba(255,255,255,0.5)';
@@ -794,6 +832,77 @@ function renderizarEnvelope(env) {
   c.fillText('D', (xa + xd) / 2, h - 1);
   c.fillText('S', (xd + xs) / 2, h - 1);
   c.fillText('R', (xs + xr) / 2, h - 1);
+}
+
+// ------------------------------------------------------------
+// Painel: Série de alturas (item 5)
+// ------------------------------------------------------------
+function ligarPainelSerie() {
+  const ativa = document.getElementById('cSerieAtiva');
+  const texto = document.getElementById('cSerieTexto');
+  const modo = document.getElementById('cSerieModo');
+  const oitava = document.getElementById('cSerieOitava');
+
+  if (ativa) ativa.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  if (ativa) ativa.addEventListener('change', () => {
+    const cam = camadaSelecionada();
+    if (!cam) return;
+    cam.serieAlturas.ativa = ativa.checked;
+    atualizarResumosSerie(cam);
+    marcarRender();
+  });
+
+  if (texto) {
+    texto.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
+    texto.addEventListener('input', () => {
+      const cam = camadaSelecionada();
+      if (!cam) return;
+      cam.serieAlturas.texto = texto.value;
+      atualizarResumosSerie(cam);
+      marcarRender();
+    });
+  }
+
+  if (modo) modo.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  if (modo) modo.addEventListener('change', () => {
+    const cam = camadaSelecionada();
+    if (!cam) return;
+    cam.serieAlturas.modo = modo.value;
+    atualizarResumosSerie(cam);
+    marcarRender();
+  });
+
+  if (oitava) oitava.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  if (oitava) oitava.addEventListener('change', () => {
+    const cam = camadaSelecionada();
+    if (!cam) return;
+    cam.serieAlturas.oitava = oitava.value;
+    marcarRender();
+  });
+}
+
+function atualizarResumosSerie(cam) {
+  const el = document.getElementById('cSerieResumo');
+  const inp = document.getElementById('cSerieTexto');
+  if (!el) return;
+  const serie = cam.serieAlturas || { texto: '', modo: 'absoluta' };
+
+  const dens = Math.max(0.1, cam.densidadeRitmica || 1);
+  const pulso = cam.pulso > 0 ? cam.pulso : 0.5;
+  const passo = pulso / dens;
+  const { validos, ignorados, cicloAtaques, cicloSegundos } =
+    resumoSerie(serie.texto || '', cam.padraoRitmico || [], passo);
+
+  const tokens = parseSerie(serie.texto || '').valores.slice(0, 8);
+  const preview = tokens.map(v => v == null ? '*' : Math.round(v)).join(' ');
+
+  let txt = `${validos} ${validos === 1 ? 'altura' : 'alturas'}`;
+  if (validos) txt += `: ${preview}`;
+  txt += ` · ciclo de ${cicloAtaques} ataques`;
+  if (cicloSegundos != null) txt += ` (${cicloSegundos.toFixed(2)} s)`;
+  if (ignorados.length) txt += ` · ${ignorados.length} token(s) ignorado(s): "${ignorados.slice(0, 3).join(' ')}"`;
+  el.textContent = txt;
+  if (inp) inp.classList.toggle('erro', ignorados.length > 0);
 }
 
 // ------------------------------------------------------------
@@ -816,7 +925,6 @@ function ligarPainelRelacoes() {
       }
     };
   }
-
   const btnRemover = document.getElementById('btnRemoverRelacao');
   if (btnRemover) {
     btnRemover.onclick = () => {
@@ -842,7 +950,6 @@ function ligarExportacao() {
   const btnConfirmar = document.getElementById('expConfirmar');
   const progFill = document.getElementById('expProgressoFill');
   const statusEl = document.getElementById('expStatus');
-
   if (!btn || !dlg) return;
 
   btn.onclick = () => {
@@ -859,7 +966,6 @@ function ligarExportacao() {
     statusEl.textContent = 'Pronto.';
     dlg.style.display = 'flex';
   };
-
   btnCancelar.onclick = () => { dlg.style.display = 'none'; };
   dlg.addEventListener('click', e => { if (e.target === dlg) dlg.style.display = 'none'; });
 
@@ -874,11 +980,9 @@ function ligarExportacao() {
       const escopo = document.getElementById('expEscopo').value;
       const cam = camadaSelecionada();
       const somenteCamadaId = (escopo === 'solo' && cam) ? cam.id : null;
-
       await exportarWAV(estado.projeto, {
         bits, sampleRate, somenteCamadaId, nome: nome + '.wav',
       }, (p) => { progFill.style.width = Math.round(p * 100) + '%'; });
-
       statusEl.textContent = 'Pronto: ' + nome + '.wav';
       setTimeout(() => { dlg.style.display = 'none'; }, 700);
     } catch (e) {
@@ -983,6 +1087,16 @@ export function atualizarPainel() {
     document.getElementById('cTimbre').value = (cam.timbre && cam.timbre.tipo) || 'sine';
     renderizarTimbre(cam);
 
+    // Série de alturas
+    const sa = cam.serieAlturas || { ativa:false, texto:'', modo:'absoluta', oitava:'proxima' };
+    document.getElementById('cSerieAtiva').checked = !!sa.ativa;
+    document.getElementById('cSerieTexto').value = sa.texto || '';
+    document.getElementById('cSerieModo').value = sa.modo || 'absoluta';
+    document.getElementById('cSerieOitava').value = sa.oitava || 'proxima';
+    const wrapOit = document.getElementById('serieOitavaWrap');
+    if (wrapOit) wrapOit.style.display = (sa.modo === 'classe') ? 'flex' : 'none';
+    atualizarResumosSerie(cam);
+
     atualizarResumoRitmo();
   }
 
@@ -1070,24 +1184,20 @@ function atualizarListaRelacoes() {
     for (const [campo, rotulo] of campos) {
       const linha = document.createElement('div');
       linha.className = 'relacaoLinha';
-
       const lbl = document.createElement('span');
       lbl.className = 'relacaoRotulo';
       lbl.textContent = rotulo;
       linha.appendChild(lbl);
-
       const inp = document.createElement('input');
       inp.type = 'range';
       inp.min = 0; inp.max = 100; inp.step = 1;
       inp.value = r[campo] == null ? 0 : r[campo];
       inp.className = 'relacaoRange';
       linha.appendChild(inp);
-
       const valTxt = document.createElement('span');
       valTxt.className = 'relacaoValor';
       valTxt.textContent = r[campo] == null ? 'inativa' : r[campo] + '%';
       linha.appendChild(valTxt);
-
       const btAtiva = document.createElement('button');
       btAtiva.className = 'relacaoToggle';
       btAtiva.textContent = r[campo] == null ? '—' : '✓';
@@ -1100,15 +1210,11 @@ function atualizarListaRelacoes() {
         atualizarListaRelacoes();
       };
       linha.appendChild(btAtiva);
-
-      inp.oninput = () => {
-        valTxt.textContent = inp.value + '%';
-      };
+      inp.oninput = () => { valTxt.textContent = inp.value + '%'; };
       inp.onchange = () => {
         onRelacaoSliderChange(r.id, campo, inp.value, valTxt);
         atualizarListaRelacoes();
       };
-
       li.appendChild(linha);
     }
 
@@ -1123,6 +1229,14 @@ function atualizarListaRelacoes() {
       if (r.ritmo != null)      vals.push(`ritmo ${a.ritmo ?? '—'}%`);
       if (r.direcao != null)    vals.push(`dir ${a.direcao ?? '—'}%`);
       if (r.intervalar != null) vals.push(`int ${a.intervalar ?? '—'}%`);
+      if (a.ajustes) {
+        const { oitava, proxima, descartadas } = a.ajustes;
+        const aj = [];
+        if (oitava) aj.push(`${oitava} por oitava`);
+        if (proxima) aj.push(`${proxima} realocada(s)`);
+        if (descartadas) aj.push(`${descartadas} descartada(s)`);
+        if (aj.length) vals.push('ajustes: ' + aj.join(', '));
+      }
       if (vals.length) partes.push(`<b>${dep.nome}</b>: ${vals.join(' · ')}`);
     }
     linhaAting.innerHTML = partes.length ? 'atingido — ' + partes.join(' | ') : '';
