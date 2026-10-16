@@ -78,43 +78,42 @@
 
         <hr>
         <h3>Altura</h3>
-        <label title="livre = altura contínua; semitons = arredonda MIDI; conjunto = arredonda para a classe mais próxima da lista">Quantização
+        <label title="livre = altura contínua; semitons = arredonda MIDI; conjunto = classes permitidas; série = usa a lista da série de alturas">Quantização
           <select id="cQuant">
             <option value="livre">Livre</option>
             <option value="semitons">Semitons</option>
             <option value="conjunto">Conjunto de classes</option>
+            <option value="serie">Série de alturas</option>
           </select>
         </label>
+
         <div id="conjuntoWrap" style="display:none">
           <div class="dica">Marque as classes de altura permitidas (0 = C):</div>
           <div id="classesBox" class="classes"></div>
         </div>
 
-        <hr>
-        <h3>Série de alturas</h3>
-        <label title="Se marcado, a altura de cada ataque vem da série abaixo, em vez do sorteio">
-          <input type="checkbox" id="cSerieAtiva"> Usar série de alturas
-        </label>
-        <input type="text" id="cSerieTexto" class="campoLargo" placeholder="C3, E3, G3, Bb3">
-        <div class="dica">
-          Tokens separados por vírgula ou espaço.<br>
-          <b>C3</b> = dó central (MIDI 60). Aceita <b>C#3</b>, <b>Bb2</b>, <b>do3</b>, <b>mib4</b>,
-          número MIDI (<b>60</b>, <b>60.5</b>), Hz (<b>440hz</b>) e <b>*</b> (altura livre).
+        <div id="serieWrap" style="display:none">
+          <input type="text" id="cSerieTexto" class="campoLargo" placeholder="C3, E3, G3, Bb3">
+          <div class="dica">
+            Tokens separados por vírgula ou espaço.<br>
+            <b>C3</b> = dó central (MIDI 60). Aceita <b>C#3</b>, <b>Bb2</b>, <b>do3</b>, <b>mib4</b>,
+            número MIDI (<b>60</b>, <b>60.5</b>), Hz (<b>440hz</b>) e <b>*</b> (altura livre).
+          </div>
+          <label title="Modo de interpretação das alturas da série">Modo
+            <select id="cSerieModo">
+              <option value="absoluta">Alturas absolutas</option>
+              <option value="classe">Classes de altura</option>
+            </select>
+          </label>
+          <label id="serieOitavaWrap" title="Como escolher a oitava no modo classe" style="display:none">
+            Oitava
+            <select id="cSerieOitava">
+              <option value="proxima">Mais próxima da anterior</option>
+              <option value="aleatoria">Aleatória</option>
+            </select>
+          </label>
+          <div id="cSerieResumo" class="resumo"></div>
         </div>
-        <label title="Modo de interpretação das alturas da série">Modo
-          <select id="cSerieModo">
-            <option value="absoluta">Alturas absolutas</option>
-            <option value="classe">Classes de altura</option>
-          </select>
-        </label>
-        <label id="serieOitavaWrap" title="Como escolher a oitava no modo classe" style="display:none">
-          Oitava
-          <select id="cSerieOitava">
-            <option value="proxima">Mais próxima da anterior</option>
-            <option value="aleatoria">Aleatória</option>
-          </select>
-        </label>
-        <div id="cSerieResumo" class="resumo"></div>
 
         <hr>
         <h3>Timbre</h3>

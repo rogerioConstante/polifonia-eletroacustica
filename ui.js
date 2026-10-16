@@ -97,9 +97,7 @@ function ligarTransporte() {
         btnPlay.textContent = '⏸';
         setStatus('tocando');
       }
-    } catch (e) {
-      setStatus('erro de áudio: ' + e.message);
-    }
+    } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
 
   btnPlayCamada.onclick = async () => {
@@ -112,9 +110,7 @@ function ligarTransporte() {
         btnPlay.textContent = '⏸';
         setStatus('tocando somente ' + cam.nome + ' (relações ignoradas)');
       }
-    } catch (e) {
-      setStatus('erro de áudio: ' + e.message);
-    }
+    } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
 
   btnStop.onclick = () => {
@@ -151,7 +147,6 @@ function ligarAutomacoes() {
     const hit = automacaoHitTest(cv, x, y);
     if (hit && hit.idx >= 0) removerPontoAutomacao(hit.tipo, hit.ponto);
   });
-  // 1c: arrasto sobrevive fora do contêiner
   window.addEventListener('mousemove', onAutomacaoMouseMove);
   window.addEventListener('mouseup',   onAutomacaoMouseUp);
 }
@@ -183,14 +178,11 @@ function onAutomacaoMouseDown(e) {
   if (e.shiftKey) return;
 
   const t = Math.max(0, xParaT(x + CALHA_PX));
-
-  // 1b: recusa criar fora do intervalo do polígono
   const ext = extensaoTemporal(cam);
   if (ext && (t < ext.t0 - 1e-6 || t > ext.t1 + 1e-6)) {
     setStatus('fora do intervalo do polígono');
     return;
   }
-
   const v = yParaValor(y, h);
   pushUndo();
   const pts = cam.automacoes[tipo] || [];
@@ -215,14 +207,11 @@ function onAutomacaoMouseMove(e) {
   const h = cv.getBoundingClientRect().height;
   const p = arr.ponto;
   if (!p) return;
-
   const ext = extensaoTemporal(cam);
   let t = Math.max(0, xParaT(x + CALHA_PX));
   if (ext) t = Math.min(Math.max(t, ext.t0), ext.t1);
   p.t = t;
   p.v = yParaValor(y, h);
-
-  // 1c: reordena a cada movimento
   const pts = cam.automacoes[arr.tipo];
   pts.sort((a, b) => a.t - b.t);
   marcarRender();
@@ -269,7 +258,7 @@ function removerPontoAutomacao(tipo, ponto) {
 }
 
 // ------------------------------------------------------------
-// Snap
+// Snap de altura
 // ------------------------------------------------------------
 function snapAltura(f) {
   if (!estado.snapAltura) return f;
@@ -353,15 +342,13 @@ function onMouseDown(e) {
     } else {
       estado.selecao = [cam.id];
       pushUndo();
-      // 1a: guarda cópia dos t das automações para deslocamento conjunto
       const origAuto = {
         dinamica: (cam.automacoes.dinamica || []).map(p => ({ obj: p, t: p.t })),
         panorama: (cam.automacoes.panorama || []).map(p => ({ obj: p, t: p.t })),
         reverb:   (cam.automacoes.reverb   || []).map(p => ({ obj: p, t: p.t })),
       };
       arrasto = { tipo: 'camada', id: cam.id, t0: t, f0: f,
-                  orig: cam.vertices.map(v => ({ ...v })),
-                  origAuto };
+                  orig: cam.vertices.map(v => ({ ...v })), origAuto };
     }
     atualizarPainel();
     marcarRender();
@@ -384,43 +371,30 @@ function onMouseMove(e) {
   } else if (arrasto.tipo === 'camada') {
     let dt = xParaT(x) - arrasto.t0;
     const df = yParaF(y) / arrasto.f0;
-
-    // 1a: dt global (não deforma o polígono ao encostar em t = 0).
     let minT = Infinity;
     for (const v of arrasto.orig) if (v.t < minT) minT = v.t;
     for (const lista of Object.values(arrasto.origAuto)) {
       for (const { t: tOrig } of lista) if (tOrig < minT) minT = tOrig;
     }
     dt = Math.max(dt, -minT);
-
     for (let i = 0; i < cam.vertices.length; i++) {
       cam.vertices[i].t = arrasto.orig[i].t + dt;
       cam.vertices[i].f = arrasto.orig[i].f * df;
     }
     for (const lista of Object.values(arrasto.origAuto)) {
-      for (const { obj, t: tOrig } of lista) {
-        obj.t = Math.max(0, tOrig + dt);
-      }
-      // mantém ordenado
+      for (const { obj, t: tOrig } of lista) obj.t = Math.max(0, tOrig + dt);
       const tipo = Object.keys(arrasto.origAuto).find(k => arrasto.origAuto[k] === lista);
-      if (tipo && cam.automacoes[tipo]) {
-        cam.automacoes[tipo].sort((a, b) => a.t - b.t);
-      }
+      if (tipo && cam.automacoes[tipo]) cam.automacoes[tipo].sort((a, b) => a.t - b.t);
     }
   }
   marcarRender();
 }
 
 function onMouseUp() {
-  if (arrasto) {
-    arrasto = null;
-    atualizarPainel();
-  }
+  if (arrasto) { arrasto = null; atualizarPainel(); }
 }
 
-function onDblClick() {
-  if (estado.ferramenta === 'draw') fecharPoligono();
-}
+function onDblClick() { if (estado.ferramenta === 'draw') fecharPoligono(); }
 
 function onWheel(e) {
   e.preventDefault();
@@ -435,8 +409,7 @@ function onWheel(e) {
     const fator = e.deltaY < 0 ? 1.1 : 1 / 1.1;
     estado.zoomY = Math.max(20, Math.min(600, estado.zoomY * fator));
   } else if (e.shiftKey) {
-    const delta = e.deltaY * 0.002;
-    estado.fMin *= Math.pow(2, delta);
+    estado.fMin *= Math.pow(2, e.deltaY * 0.002);
   } else {
     estado.scrollX += e.deltaY * 0.002 * ((tamanhoCanvas().W - CALHA_PX) / estado.zoomX);
     estado.scrollX = Math.max(0, estado.scrollX);
@@ -450,9 +423,7 @@ function onWheel(e) {
 function fecharPoligono() {
   const d = estado.desenhando;
   if (!d || d.vertices.length < 3) {
-    estado.desenhando = null;
-    marcarRender();
-    return;
+    estado.desenhando = null; marcarRender(); return;
   }
   pushUndo();
   const cam = criarCamada(d.vertices);
@@ -465,7 +436,7 @@ function fecharPoligono() {
 }
 
 // ------------------------------------------------------------
-// Hit-test
+// Hit-test de polígono
 // ------------------------------------------------------------
 function camadaNoPonto(t, f) {
   const cams = [...estado.projeto.camadas].reverse();
@@ -474,7 +445,6 @@ function camadaNoPonto(t, f) {
   }
   return null;
 }
-
 function pontoEmPoligono(t, f, verts) {
   let dentro = false;
   for (let i = 0, j = verts.length - 1; i < verts.length; j = i++) {
@@ -501,7 +471,6 @@ function ligarTeclado() {
       excluirSelecao();
       return;
     }
-
     if (e.key === 'v' || e.key === 'V') setFerramenta('select');
     else if (e.key === 'p' || e.key === 'P') setFerramenta('draw');
     else if (e.key === 'Enter') fecharPoligono();
@@ -513,8 +482,7 @@ function ligarTeclado() {
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); baixarProjeto(); setStatus('salvo'); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); abrirProjetoDialogo().then(ok => { if (ok) { atualizarPainel(); marcarRender(); setStatus('aberto'); } }); }
     else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault();
-      const btn = document.getElementById('btnExportar');
-      if (btn) btn.click();
+      const btn = document.getElementById('btnExportar'); if (btn) btn.click();
     }
   });
 }
@@ -546,7 +514,6 @@ function duplicarSelecao() {
     copia.id = uid();
     copia.nome = cam.nome + ' (cópia)';
     copia.vertices = copia.vertices.map(v => ({ t: v.t + 0.5, f: v.f }));
-    // 1a: deslocar também as automações
     for (const tipo of ['dinamica','panorama','reverb']) {
       copia.automacoes[tipo] = (copia.automacoes[tipo] || []).map(p => ({ ...p, t: p.t + 0.5 }));
     }
@@ -587,9 +554,7 @@ function ligarPainelProjeto() {
       if (ok) { atualizarPainel(); marcarRender(); setStatus('aberto'); }
     }).catch(err => setStatus('erro ao abrir: ' + err.message));
   };
-  document.getElementById('btnSalvar').onclick = () => {
-    baixarProjeto(); setStatus('salvo');
-  };
+  document.getElementById('btnSalvar').onclick = () => { baixarProjeto(); setStatus('salvo'); };
 
   const vm = document.getElementById('volMaster');
   vm.oninput = () => {
@@ -600,15 +565,9 @@ function ligarPainelProjeto() {
     estado.projeto.duracaoTotal = +e.target.value || 30;
     marcarRender();
   };
-  document.getElementById('snapAltura').onchange = e => {
-    estado.snapAltura = e.target.checked;
-  };
+  document.getElementById('snapAltura').onchange = e => { estado.snapAltura = e.target.checked; };
   const rt = document.getElementById('reverbTempo');
-  if (rt) {
-    rt.oninput = e => {
-      estado.projeto.reverbTempo = Math.max(0.1, +e.target.value || 2);
-    };
-  }
+  if (rt) rt.oninput = e => { estado.projeto.reverbTempo = Math.max(0.1, +e.target.value || 2); };
 }
 
 // ------------------------------------------------------------
@@ -649,22 +608,18 @@ function ligarPainelCamada() {
   cPulso.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
   cPulso.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   cPulso.addEventListener('input', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     const p = Math.max(0.02, +cPulso.value || 0.5);
-    cam.pulso = p;
-    cam.andamento = Math.round(60 / p);
+    cam.pulso = p; cam.andamento = Math.round(60 / p);
     cBpm.value = cam.andamento;
     atualizarResumoRitmo();
   });
   cBpm.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
   cBpm.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   cBpm.addEventListener('input', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     const b = Math.max(20, Math.min(600, +cBpm.value || 120));
-    cam.andamento = b;
-    cam.pulso = 60 / b;
+    cam.andamento = b; cam.pulso = 60 / b;
     cPulso.value = cam.pulso.toFixed(3);
     atualizarResumoRitmo();
   });
@@ -672,11 +627,9 @@ function ligarPainelCamada() {
   const elPad = document.getElementById('cPadraoRitmico');
   elPad.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
   elPad.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     const arr = elPad.value.split(',')
-      .map(s => s.trim())
-      .filter(s => s !== '')
+      .map(s => s.trim()).filter(s => s !== '')
       .map(s => (s === '1' || s === '0') ? +s : null)
       .filter(v => v !== null);
     if (!arr.length) { elPad.value = cam.padraoRitmico.join(','); return; }
@@ -685,24 +638,29 @@ function ligarPainelCamada() {
     atualizarResumoRitmo();
   });
 
+  // Quantização: inclui agora `serie`. Controla a visibilidade
+  // de `#conjuntoWrap` e `#serieWrap`.
   const selQ = document.getElementById('cQuant');
   selQ.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   selQ.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     const modo = selQ.value;
     if (modo === 'conjunto') {
       const classes = cam.quantizacaoAltura.classes || [0,2,4,5,7,9,11];
       cam.quantizacaoAltura = { modo, classes };
+    } else if (modo === 'serie') {
+      // Ativa a série via modo. O texto pode estar vazio; o usuário
+      // preenche no campo que vai aparecer.
+      cam.quantizacaoAltura = { modo: 'serie' };
     } else {
       cam.quantizacaoAltura = { modo };
     }
     atualizarPainel();
+    marcarRender();
   });
 
   document.getElementById('btnSortear').onclick = () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     pushUndo();
     cam.semente = Math.floor(Math.random() * 1e6);
     document.getElementById('cSemente').value = cam.semente;
@@ -711,8 +669,7 @@ function ligarPainelCamada() {
   const selT = document.getElementById('cTimbre');
   selT.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
   selT.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
+    const cam = camadaSelecionada(); if (!cam) return;
     cam.timbre = timbrePadrao(selT.value);
     renderizarTimbre(cam);
     marcarRender();
@@ -738,19 +695,15 @@ function renderizarTimbre(cam) {
     inp.value = valor;
     inp.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
     inp.addEventListener('change', () => {
-      const cam2 = camadaSelecionada();
-      if (!cam2) return;
+      const cam2 = camadaSelecionada(); if (!cam2) return;
       cam2.timbre[id] = +inp.value;
     });
-    l.appendChild(inp);
-    box.appendChild(l);
+    l.appendChild(inp); box.appendChild(l);
   }
 
   if (t.tipo === 'sine') {
-    const d = document.createElement('div');
-    d.className = 'dica';
-    d.textContent = 'Sem parâmetros.';
-    box.appendChild(d);
+    const d = document.createElement('div'); d.className = 'dica';
+    d.textContent = 'Sem parâmetros.'; box.appendChild(d);
   } else if (t.tipo === 'aditiva') {
     campo('nHarm',      'Harmônicos', 1, 32, 1,   t.nHarm      ?? 6);
     campo('inclinacao', 'Inclinação', 0.1, 5, 0.1, t.inclinacao ?? 1.5);
@@ -768,12 +721,10 @@ function renderizarTimbre(cam) {
 function ligarPainelEnvelope() {
   const ids = ['envA','envD','envS','envR','envSustain','envRigor'];
   for (const id of ids) {
-    const el = document.getElementById(id);
-    if (!el) continue;
+    const el = document.getElementById(id); if (!el) continue;
     el.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
     el.addEventListener('input', () => {
-      const cam = camadaSelecionada();
-      if (!cam) return;
+      const cam = camadaSelecionada(); if (!cam) return;
       const env = { ...cam.envelope };
       env.a = +document.getElementById('envA').value;
       env.d = +document.getElementById('envD').value;
@@ -792,42 +743,31 @@ function ligarPainelEnvelope() {
 }
 
 function renderizarEnvelope(env) {
-  const cv = document.getElementById('envPreview');
-  if (!cv) return;
+  const cv = document.getElementById('envPreview'); if (!cv) return;
   const c = cv.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
   const w = cv.clientWidth || 280;
   const h = cv.clientHeight || 70;
   if (cv.width !== w * dpr || cv.height !== h * dpr) {
-    cv.width = Math.floor(w * dpr);
-    cv.height = Math.floor(h * dpr);
+    cv.width = Math.floor(w * dpr); cv.height = Math.floor(h * dpr);
   }
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
-  c.fillStyle = '#1e1e1e';
-  c.fillRect(0, 0, w, h);
-  c.strokeStyle = 'rgba(255,255,255,0.06)';
-  c.beginPath();
+  c.fillStyle = '#1e1e1e'; c.fillRect(0, 0, w, h);
+  c.strokeStyle = 'rgba(255,255,255,0.06)'; c.beginPath();
   for (let i = 1; i < 5; i++) { const x = (w * i) / 5; c.moveTo(x, 0); c.lineTo(x, h); }
   c.stroke();
-
   const a = Math.max(0, env.a) / 100;
   const d = Math.max(0, env.d) / 100;
   const s = Math.max(0, env.s) / 100;
   const sus = Math.max(0, Math.min(1, env.nivelSustain));
-
   const xa = a * w, xd = (a + d) * w, xs = (a + d + s) * w, xr = w;
   const yTop = 4, yBase = h - 4;
   const yS = yBase - (yBase - yTop) * sus;
-
-  c.strokeStyle = '#4a7fb5';
-  c.lineWidth = 1.6;
+  c.strokeStyle = '#4a7fb5'; c.lineWidth = 1.6;
   c.beginPath();
   c.moveTo(0, yBase); c.lineTo(xa, yTop); c.lineTo(xd, yS); c.lineTo(xs, yS); c.lineTo(xr, yBase);
   c.stroke();
-
-  c.fillStyle = 'rgba(255,255,255,0.5)';
-  c.font = '9px system-ui';
-  c.textAlign = 'center';
+  c.fillStyle = 'rgba(255,255,255,0.5)'; c.font = '9px system-ui'; c.textAlign = 'center';
   c.fillText('A', xa / 2, h - 1);
   c.fillText('D', (xa + xd) / 2, h - 1);
   c.fillText('S', (xd + xs) / 2, h - 1);
@@ -835,22 +775,12 @@ function renderizarEnvelope(env) {
 }
 
 // ------------------------------------------------------------
-// Painel: Série de alturas (item 5)
+// Painel: Série de alturas (agora dentro da quantização)
 // ------------------------------------------------------------
 function ligarPainelSerie() {
-  const ativa = document.getElementById('cSerieAtiva');
   const texto = document.getElementById('cSerieTexto');
   const modo = document.getElementById('cSerieModo');
   const oitava = document.getElementById('cSerieOitava');
-
-  if (ativa) ativa.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
-  if (ativa) ativa.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
-    cam.serieAlturas.ativa = ativa.checked;
-    atualizarResumosSerie(cam);
-    marcarRender();
-  });
 
   if (texto) {
     texto.addEventListener('focus', () => { if (camadaSelecionada()) pushUndo(); });
@@ -863,22 +793,32 @@ function ligarPainelSerie() {
     });
   }
 
-  if (modo) modo.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
-  if (modo) modo.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
-    cam.serieAlturas.modo = modo.value;
-    atualizarResumosSerie(cam);
-    marcarRender();
-  });
+  if (modo) {
+    modo.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+    modo.addEventListener('change', () => {
+      const cam = camadaSelecionada();
+      if (!cam) return;
+      cam.serieAlturas.modo = modo.value;
+      atualizarOitavaVisivel(modo.value);
+      atualizarResumosSerie(cam);
+      marcarRender();
+    });
+  }
 
-  if (oitava) oitava.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
-  if (oitava) oitava.addEventListener('change', () => {
-    const cam = camadaSelecionada();
-    if (!cam) return;
-    cam.serieAlturas.oitava = oitava.value;
-    marcarRender();
-  });
+  if (oitava) {
+    oitava.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+    oitava.addEventListener('change', () => {
+      const cam = camadaSelecionada();
+      if (!cam) return;
+      cam.serieAlturas.oitava = oitava.value;
+      marcarRender();
+    });
+  }
+}
+
+function atualizarOitavaVisivel(modo) {
+  const wrap = document.getElementById('serieOitavaWrap');
+  if (wrap) wrap.style.display = (modo === 'classe') ? 'flex' : 'none';
 }
 
 function atualizarResumosSerie(cam) {
@@ -912,17 +852,10 @@ function ligarPainelRelacoes() {
   const btnNova = document.getElementById('btnNovaRelacao');
   if (btnNova) {
     btnNova.onclick = () => {
-      if (estado.selecao.length < 2) {
-        setStatus('selecione 2+ camadas (1ª = referência)');
-        return;
-      }
+      if (estado.selecao.length < 2) { setStatus('selecione 2+ camadas (1ª = referência)'); return; }
       pushUndo();
       const r = criarRelacaoDaSelecao();
-      if (r) {
-        recalcularAtingidos();
-        setStatus('relação criada');
-        atualizarPainel();
-      }
+      if (r) { recalcularAtingidos(); setStatus('relação criada'); atualizarPainel(); }
     };
   }
   const btnRemover = document.getElementById('btnRemoverRelacao');
@@ -962,8 +895,7 @@ function ligarExportacao() {
         if (!cam && selEscopo.value === 'solo') selEscopo.value = 'tudo';
       }
     }
-    progFill.style.width = '0%';
-    statusEl.textContent = 'Pronto.';
+    progFill.style.width = '0%'; statusEl.textContent = 'Pronto.';
     dlg.style.display = 'flex';
   };
   btnCancelar.onclick = () => { dlg.style.display = 'none'; };
@@ -1055,10 +987,14 @@ export function atualizarPainel() {
     document.getElementById('envRigor').value = env.rigor;
     renderizarEnvelope(env);
 
+    // Quantização: inclui 'serie'
     const modo = cam.quantizacaoAltura.modo || 'livre';
     document.getElementById('cQuant').value = modo;
     const wrapClasses = document.getElementById('conjuntoWrap');
     wrapClasses.style.display = modo === 'conjunto' ? 'block' : 'none';
+    const wrapSerie = document.getElementById('serieWrap');
+    wrapSerie.style.display = modo === 'serie' ? 'block' : 'none';
+
     if (modo === 'conjunto') {
       const classes = cam.quantizacaoAltura.classes || [];
       const box = document.getElementById('classesBox');
@@ -1084,19 +1020,17 @@ export function atualizarPainel() {
       }
     }
 
+    if (modo === 'serie') {
+      const sa = cam.serieAlturas || { texto:'', modo:'absoluta', oitava:'proxima' };
+      document.getElementById('cSerieTexto').value = sa.texto || '';
+      document.getElementById('cSerieModo').value = sa.modo || 'absoluta';
+      document.getElementById('cSerieOitava').value = sa.oitava || 'proxima';
+      atualizarOitavaVisivel(sa.modo || 'absoluta');
+      atualizarResumosSerie(cam);
+    }
+
     document.getElementById('cTimbre').value = (cam.timbre && cam.timbre.tipo) || 'sine';
     renderizarTimbre(cam);
-
-    // Série de alturas
-    const sa = cam.serieAlturas || { ativa:false, texto:'', modo:'absoluta', oitava:'proxima' };
-    document.getElementById('cSerieAtiva').checked = !!sa.ativa;
-    document.getElementById('cSerieTexto').value = sa.texto || '';
-    document.getElementById('cSerieModo').value = sa.modo || 'absoluta';
-    document.getElementById('cSerieOitava').value = sa.oitava || 'proxima';
-    const wrapOit = document.getElementById('serieOitavaWrap');
-    if (wrapOit) wrapOit.style.display = (sa.modo === 'classe') ? 'flex' : 'none';
-    atualizarResumosSerie(cam);
-
     atualizarResumoRitmo();
   }
 
@@ -1147,10 +1081,7 @@ function atualizarListaRelacoes() {
   const ul = document.getElementById('listaRelacoes');
   const sem = document.getElementById('semRelacoes');
   ul.innerHTML = '';
-  if (!estado.projeto.relacoes.length) {
-    sem.style.display = 'block';
-    return;
-  }
+  if (!estado.projeto.relacoes.length) { sem.style.display = 'block'; return; }
   sem.style.display = 'none';
 
   const atingidos = (typeof valoresAtingidos === 'function') ? valoresAtingidos() : new Map();
@@ -1185,12 +1116,10 @@ function atualizarListaRelacoes() {
       const linha = document.createElement('div');
       linha.className = 'relacaoLinha';
       const lbl = document.createElement('span');
-      lbl.className = 'relacaoRotulo';
-      lbl.textContent = rotulo;
+      lbl.className = 'relacaoRotulo'; lbl.textContent = rotulo;
       linha.appendChild(lbl);
       const inp = document.createElement('input');
-      inp.type = 'range';
-      inp.min = 0; inp.max = 100; inp.step = 1;
+      inp.type = 'range'; inp.min = 0; inp.max = 100; inp.step = 1;
       inp.value = r[campo] == null ? 0 : r[campo];
       inp.className = 'relacaoRange';
       linha.appendChild(inp);
@@ -1211,10 +1140,7 @@ function atualizarListaRelacoes() {
       };
       linha.appendChild(btAtiva);
       inp.oninput = () => { valTxt.textContent = inp.value + '%'; };
-      inp.onchange = () => {
-        onRelacaoSliderChange(r.id, campo, inp.value, valTxt);
-        atualizarListaRelacoes();
-      };
+      inp.onchange = () => { onRelacaoSliderChange(r.id, campo, inp.value, valTxt); atualizarListaRelacoes(); };
       li.appendChild(linha);
     }
 

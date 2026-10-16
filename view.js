@@ -290,19 +290,18 @@ export function desenharCursor(tempo) {
 // Faixas de automação
 // ------------------------------------------------------------
 export const estadoAutomacao = {
-  selecionada: null,   // { camId, tipo, ponto }  (item 1c)
-  arrasto: null,       // { camId, tipo, ponto }  (item 1c)
+  selecionada: null,
+  arrasto: null,
 };
 
+/** Desenha o esqueleto (grid + linhas 0.0 / 0.5 / 1.0) sempre,
+ *  e adiciona curva/pontos apenas quando há camada selecionada. */
 export function desenharAutomacoes() {
   const cont = document.getElementById('automacoes');
   if (!cont) return;
   const cam = camadaSelecionada();
 
-  if (!cam) { cont.classList.add('oculto'); return; }
-  cont.classList.remove('oculto');
-
-  const ext = extensaoTemporal(cam);
+  const ext = cam ? extensaoTemporal(cam) : null;
   const t0 = ext ? ext.t0 : null;
   const t1 = ext ? ext.t1 : null;
 
@@ -321,13 +320,14 @@ export function desenharAutomacoes() {
     const c = cv.getContext('2d');
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
 
+    // Fundo
     c.fillStyle = '#fff';
     c.fillRect(0, 0, w, h);
 
     const xT = (t) => tParaX(t) - CALHA_PX;
     const tDeX = (x) => xParaT(x + CALHA_PX);
 
-    // Grid vertical
+    // --- Esqueleto: grid vertical (segue scroll/zoom) ---
     const tv0 = estado.scrollX, tv1 = tDeX(w);
     const passo = passoBonito(tv1 - tv0, 10);
     const sIni = Math.floor(tv0 / passo) * passo;
@@ -342,30 +342,47 @@ export function desenharAutomacoes() {
     }
     c.stroke();
 
-    // Linha média
-    c.strokeStyle = 'rgba(0,0,0,0.12)';
-    c.beginPath(); c.moveTo(0, h / 2 + 0.5); c.lineTo(w, h / 2 + 0.5); c.stroke();
+    // --- Esqueleto: linhas horizontais 1.0 / 0.5 / 0.0 ---
+    // 1.0 (topo) e 0.0 (base): linhas suaves.
+    c.strokeStyle = 'rgba(0,0,0,0.10)';
+    c.beginPath();
+    c.moveTo(0, 0.5);
+    c.lineTo(w, 0.5);
+    c.moveTo(0, h - 0.5);
+    c.lineTo(w, h - 0.5);
+    c.stroke();
 
-    // Véu fora de [t0, t1]
-    if (t0 != null && t1 != null) {
-      const xa = xT(t0);
-      const xb = xT(t1);
-      c.fillStyle = 'rgba(0,0,0,0.18)';
-      if (xa > 0) c.fillRect(0, 0, Math.min(xa, w), h);
-      if (xb < w) c.fillRect(Math.max(0, xb), 0, w - Math.max(0, xb), h);
-      // linhas verticais nas bordas
-      c.strokeStyle = 'rgba(0,0,0,0.35)';
-      c.beginPath();
-      if (xa >= 0 && xa <= w) { c.moveTo(Math.round(xa) + 0.5, 0); c.lineTo(Math.round(xa) + 0.5, h); }
-      if (xb >= 0 && xb <= w) { c.moveTo(Math.round(xb) + 0.5, 0); c.lineTo(Math.round(xb) + 0.5, h); }
-      c.stroke();
+    // 0.5 (média) pontilhada mais visível.
+    const yMeio = Math.round(h / 2) + 0.5;
+    c.strokeStyle = 'rgba(0,0,0,0.20)';
+    c.setLineDash([4, 4]);
+    c.beginPath();
+    c.moveTo(0, yMeio);
+    c.lineTo(w, yMeio);
+    c.stroke();
+    c.setLineDash([]);
+
+    // Só desenha curva/pontos/véus se houver camada.
+    if (cam) {
+      // Véu fora de [t0, t1]
+      if (t0 != null && t1 != null) {
+        const xa = xT(t0);
+        const xb = xT(t1);
+        c.fillStyle = 'rgba(0,0,0,0.18)';
+        if (xa > 0) c.fillRect(0, 0, Math.min(xa, w), h);
+        if (xb < w) c.fillRect(Math.max(0, xb), 0, w - Math.max(0, xb), h);
+        c.strokeStyle = 'rgba(0,0,0,0.35)';
+        c.beginPath();
+        if (xa >= 0 && xa <= w) { c.moveTo(Math.round(xa) + 0.5, 0); c.lineTo(Math.round(xa) + 0.5, h); }
+        if (xb >= 0 && xb <= w) { c.moveTo(Math.round(xb) + 0.5, 0); c.lineTo(Math.round(xb) + 0.5, h); }
+        c.stroke();
+      }
+
+      const pts = (cam.automacoes[tipo] || []).slice().sort((a, b) => a.t - b.t);
+      desenharCurva(c, pts, tipo, w, h, cam.id, xT, t0, t1);
     }
 
-    // Curva + pontos
-    const pts = (cam.automacoes[tipo] || []).slice().sort((a, b) => a.t - b.t);
-    desenharCurva(c, pts, tipo, w, h, cam.id, xT, t0, t1);
-
-    // Cursor
+    // Cursor de reprodução (sempre)
     if (window.__tempoReproducao != null) {
       const xc = xT(window.__tempoReproducao);
       if (xc >= 0 && xc <= w) {
@@ -378,7 +395,7 @@ export function desenharAutomacoes() {
 
     // Valor do ponto selecionado
     const sel = estadoAutomacao.selecionada;
-    if (sel && sel.camId === cam.id && sel.tipo === tipo && sel.ponto) {
+    if (cam && sel && sel.camId === cam.id && sel.tipo === tipo && sel.ponto) {
       const p = sel.ponto;
       const x = xT(p.t);
       const y = valorParaY(p.v, h);
@@ -409,13 +426,6 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT, t0, t1) {
   : tipo === 'panorama' ? '#4a90d9'
   : '#9b59b6';
 
-  const padraoV = tipo === 'dinamica' ? 1 : tipo === 'panorama' ? 0.5 : 0;
-  const yPadrao = Math.round(valorParaY(padraoV, h)) + 0.5;
-  c.strokeStyle = 'rgba(0,0,0,0.15)';
-  c.setLineDash([4, 4]);
-  c.beginPath(); c.moveTo(0, yPadrao); c.lineTo(w, yPadrao); c.stroke();
-  c.setLineDash([]);
-
   if (pts.length === 0) return;
 
   c.strokeStyle = corFaixa;
@@ -432,7 +442,7 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT, t0, t1) {
     const ya = valorParaY(a.v, h), yb = valorParaY(b.v, h);
     if (b.t <= estado.scrollX || a.t >= xParaT(w + CALHA_PX)) continue;
     if (a.curva === 'suave') {
-      const n = 24;
+      const n = 20;
       for (let k = 1; k <= n; k++) {
         const u = k / n;
         const kk = 0.5 - 0.5 * Math.cos(Math.PI * u);
@@ -458,13 +468,13 @@ function desenharCurva(c, pts, tipo, w, h, camId, xT, t0, t1) {
     const ehSel = sel && sel.camId === camId && sel.tipo === tipo && sel.ponto === p;
     c.globalAlpha = fora ? 0.35 : 1;
     c.beginPath();
-    c.arc(x, y, ehSel ? 5 : 3.5, 0, Math.PI * 2);
+    c.arc(x, y, ehSel ? 4.5 : 3, 0, Math.PI * 2);
     c.fillStyle = ehSel ? '#000' : corFaixa;
     c.fill();
     c.strokeStyle = '#fff'; c.lineWidth = 1; c.stroke();
     if (p.curva === 'suave') {
       c.beginPath();
-      c.arc(x, y, ehSel ? 7.5 : 6, 0, Math.PI * 2);
+      c.arc(x, y, ehSel ? 6.5 : 5, 0, Math.PI * 2);
       c.strokeStyle = corFaixa; c.lineWidth = 1; c.stroke();
     }
     c.globalAlpha = 1;
@@ -478,11 +488,12 @@ export function automacaoHitTest(canvasEl, x, y) {
   const h = canvasEl.getBoundingClientRect().height;
   const pts = (cam.automacoes[tipo] || []).slice().sort((a, b) => a.t - b.t);
   const xT = (t) => tParaX(t) - CALHA_PX;
+  // Raio 6 px: confortável mesmo com faixa de 38 px.
   for (let i = 0; i < pts.length; i++) {
     const p = pts[i];
     const px = xT(p.t);
     const py = valorParaY(p.v, h);
-    if (Math.hypot(px - x, py - y) < 8) return { tipo, idx: i, ponto: p };
+    if (Math.hypot(px - x, py - y) < 6) return { tipo, idx: i, ponto: p };
   }
   return { tipo, idx: -1 };
 }

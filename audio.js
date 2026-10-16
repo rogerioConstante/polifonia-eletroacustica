@@ -2,20 +2,15 @@
 // audio.js — Motor de áudio + grafo reutilizável (online/offline)
 // ============================================================
 //
-// Rodada 4 (itens 4, 5):
-//  - Helpers puros: transporPorOitava, quantizarNaFaixa,
-//    ajustarAoPoligono. Reutilizados pelas relações e pela série.
-//  - Série de alturas (`serieAlturas`) consumida em gerarEventosCamada.
-//  - Granular: grãos em torno do centro (série) ± dispersão.
+// Rodada 5: a série de alturas passa a ser UM MODO de quantização
+// (`quantizacaoAltura.modo === 'serie'`), e não mais uma flag
+// separada (`serieAlturas.ativa`).
 
 import { estado, camadaSelecionada, valorAutomacao } from './model.js';
 import { aplicarRelacoes } from './relations.js';
-import { parseSerie, midiParaHz as serieMidiParaHz } from './serie.js';
+import { parseSerie } from './serie.js';
 
-// Cauda após parar (para reverb). 0 = corte seco com fade.
 export const CAUDA_CAMADA_S = 0;
-
-// Dispersão (em semitons) dos grãos em torno do centro da nuvem.
 export const DISPERSAO_GRANULAR_ST = 1;
 
 // ------------------------------------------------------------
@@ -38,7 +33,7 @@ export function midiParaHz(m) { return 440 * Math.pow(2, (m - 69) / 12); }
 export function hzParaMidi(f) { return 69 + 12 * Math.log2(f / 440); }
 
 export function quantizar(f, quant) {
-  if (!quant || quant.modo === 'livre') return f;
+  if (!quant || quant.modo === 'livre' || quant.modo === 'serie') return f;
   let m = Math.round(hzParaMidi(f));
   if (quant.modo === 'semitons') return midiParaHz(m);
   if (quant.modo === 'conjunto') {
@@ -56,10 +51,8 @@ export function quantizar(f, quant) {
 }
 
 // ------------------------------------------------------------
-// Helpers puros de polígono/altura (itens 4 e 5)
+// Helpers puros de polígono/altura
 // ------------------------------------------------------------
-
-/** Menor transposição por oitava que põe f em [fMin, fMax]; null se nenhuma couber. */
 export function transporPorOitava(f, fMin, fMax) {
   if (!(f > 0) || !(fMin > 0) || !(fMax >= fMin)) return null;
   const kMin = Math.ceil(Math.log2(fMin / f) - 1e-9);
@@ -69,20 +62,13 @@ export function transporPorOitava(f, fMin, fMax) {
   return f * Math.pow(2, k);
 }
 
-/**
- * Entre as alturas permitidas pela quantização que caibam em
- * [fMin, fMax], a mais próxima de f (em semitons). Devolve
- * `null` se nada couber.
- */
 export function quantizarNaFaixa(f, quant, fMin, fMax) {
   if (!(fMin > 0) || !(fMax >= fMin)) return null;
   const mTop = Math.floor(hzParaMidi(fMax));
   const mBase = Math.ceil(hzParaMidi(fMin));
   if (mBase > mTop) return null;
-
   const classes = (quant && quant.modo === 'conjunto' && quant.classes && quant.classes.length)
     ? quant.classes : null;
-
   let melhor = null, melhorDist = Infinity;
   for (let m = mBase; m <= mTop; m++) {
     if (classes) {
@@ -96,29 +82,15 @@ export function quantizarNaFaixa(f, quant, fMin, fMax) {
   return melhor;
 }
 
-/**
- * Garante que `f` caiba na faixa do polígono. Devolve
- * `{ f, ajuste }` com `ajuste` ∈ {'nenhum','oitava','proxima'}.
- *
- * Ordem de preferência: 1) já cabe; 2) transposição por oitava
- * (preserva classe de altura); 3) altura viável mais próxima
- * (quantiza dentro da faixa).
- *
- * `opcoes.quantizarAntes` (padrão true): aplica `quantizar` em
- * `f` antes; a série de alturas passa `false`.
- */
 export function ajustarAoPoligono(f, faixa, quant, opcoes = {}) {
   const quantizarAntes = opcoes.quantizarAntes !== false;
   const [fMin, fMax] = faixa || [0, 0];
   if (!(fMin > 0) || !(fMax >= fMin)) return { f, ajuste: 'nenhum' };
-
   let alvo = f;
   if (quantizarAntes) alvo = quantizar(alvo, quant);
-
   if (alvo >= fMin * 0.999 && alvo <= fMax * 1.001) {
     return { f: alvo, ajuste: 'nenhum' };
   }
-
   const oit = transporPorOitava(alvo, fMin, fMax);
   if (oit != null) {
     if (quantizarAntes) {
@@ -129,11 +101,8 @@ export function ajustarAoPoligono(f, faixa, quant, opcoes = {}) {
     }
     return { f: oit, ajuste: 'oitava' };
   }
-
   const prox = quantizarNaFaixa(alvo, quant, fMin, fMax);
   if (prox != null) return { f: prox, ajuste: 'proxima' };
-
-  // fallback final: limita à borda mais próxima
   const borda = (alvo < fMin) ? fMin : fMax;
   return { f: borda, ajuste: 'proxima' };
 }
@@ -166,11 +135,6 @@ export function faixaVerticalEm(vertices, t) {
   return [ints[0][0], ints[ints.length - 1][1]];
 }
 
-/**
- * Faixa mais próxima do alvo (dentro da lista de intervalos).
- * Útil para escolher uma faixa que comporte um ajuste por oitava
- * quando há reentrâncias.
- */
 function faixaMaisProxima(ints, fAlvo) {
   if (!ints.length) return null;
   let melhor = ints[0], melhorDist = Infinity;
@@ -182,7 +146,7 @@ function faixaMaisProxima(ints, fAlvo) {
 }
 
 // ------------------------------------------------------------
-// Envelope: sorteio por evento (determinístico)
+// Envelope
 // ------------------------------------------------------------
 function sortearEnvelope(base, rigor, rEnv) {
   if (rigor >= 100) return { ...base };
@@ -207,25 +171,11 @@ function sortearEnvelope(base, rigor, rEnv) {
 // ------------------------------------------------------------
 // Escolha de altura por série
 // ------------------------------------------------------------
-//
-// Devolve a altura em Hz, ou `null` se a série não deve ser usada
-// neste ataque (o chamador sorteia normalmente).
-//
-// - `modo='absoluta'`: `midi` é literal (em MIDI). Ajusta ao
-//   polígono por oitava / mais próxima.
-// - `modo='classe'`: só importa `midi mod 12`. A oitava é
-//   escolhida dentro da faixa segundo `oitava`:
-//     'proxima'   → mais próxima de `midiAnterior` (ou do centro
-//                    da faixa no primeiro ataque).
-//     'aleatoria' → sorteada por PRNG dedicado.
-//
 function alturaDaSerie(entradaMidi, cam, ints, rSerie, midiAnterior) {
   if (ints.length === 0) return null;
   const serie = cam.serieAlturas || { modo: 'absoluta', oitava: 'proxima' };
   const modo = serie.modo || 'absoluta';
 
-  // Faixa mais adequada (o alvo ajuda a escolher a faixa interna
-  // correta em polígonos côncavos).
   const alvoHz = midiParaHz(entradaMidi);
   const faixa = faixaMaisProxima(ints, alvoHz);
   if (!faixa) return null;
@@ -239,13 +189,11 @@ function alturaDaSerie(entradaMidi, cam, ints, rSerie, midiAnterior) {
     return f;
   }
 
-  // modo classe
   const classe = ((Math.round(entradaMidi) % 12) + 12) % 12;
   const mTop = Math.floor(hzParaMidi(fMax));
   const mBase = Math.ceil(hzParaMidi(fMin));
 
   if (serie.oitava === 'aleatoria') {
-    // Enumera as classes dentro da faixa e sorteia uma.
     const candidatos = [];
     for (let m = mBase; m <= mTop; m++) {
       if ((((m % 12) + 12) % 12) === classe) candidatos.push(m);
@@ -255,8 +203,6 @@ function alturaDaSerie(entradaMidi, cam, ints, rSerie, midiAnterior) {
       return midiParaHz(candidatos[idx]);
     }
   } else {
-    // 'proxima': encontra a mais próxima de `midiAnterior` (ou do
-    // centro da faixa, no primeiro ataque).
     const centro = (mBase + mTop) / 2;
     const ref = (midiAnterior != null) ? midiAnterior : centro;
     let melhor = null, melhorDist = Infinity;
@@ -267,14 +213,12 @@ function alturaDaSerie(entradaMidi, cam, ints, rSerie, midiAnterior) {
     }
     if (melhor != null) return midiParaHz(melhor);
   }
-
-  // Fallback: mais próxima dentro da faixa (ramo proxima do ajustar).
   const prox = quantizarNaFaixa(alvoHz, cam.quantizacaoAltura, fMin, fMax);
   return prox != null ? prox : alvoHz;
 }
 
 // ------------------------------------------------------------
-// Geração de eventos por camada (item 5)
+// Geração de eventos
 // ------------------------------------------------------------
 export function gerarEventosCamada(cam, duracaoTotal) {
   const ev = [];
@@ -283,7 +227,6 @@ export function gerarEventosCamada(cam, duracaoTotal) {
 
   const rand = prng(cam.semente);
   const rEnv = prng((cam.semente ^ 0xA5A5A5A5) >>> 0);
-  // PRNG separado para a oitava 'aleatoria' da série.
   const rSerie = prng((cam.semente ^ 0x51ED270B) >>> 0);
 
   const bpm = cam.andamento > 0 ? cam.andamento : 120;
@@ -292,12 +235,12 @@ export function gerarEventosCamada(cam, duracaoTotal) {
   const padrao = (cam.padraoRitmico && cam.padraoRitmico.length) ? cam.padraoRitmico : [1];
   const envBase = cam.envelope || { a: 5, d: 10, s: 70, r: 15, nivelSustain: 0.7, rigor: 100 };
 
-  // Série de alturas (se ativa).
-  const serieAtiva = !!(cam.serieAlturas && cam.serieAlturas.ativa);
+  // Série ativa = modo de quantização 'serie' com texto não vazio.
+  const serieAtiva = cam.quantizacaoAltura && cam.quantizacaoAltura.modo === 'serie'
+    && cam.serieAlturas && (cam.serieAlturas.texto || '').trim().length > 0;
   let serieValores = [];
   if (serieAtiva) {
-    const parsed = parseSerie(cam.serieAlturas.texto || '');
-    serieValores = parsed.valores; // pode conter null (livre)
+    serieValores = parseSerie(cam.serieAlturas.texto).valores;
   }
   let idxAtaque = 0;
   let midiAnterior = null;
@@ -320,21 +263,14 @@ export function gerarEventosCamada(cam, duracaoTotal) {
     const t = t0 + i * passo;
     const ints = intervalosVerticaisEm(cam.vertices, t);
     if (!ints.length) continue;
-    // Faixa de referência para decidir se a nota "cabe":
-    // usamos a mais próxima do centro global.
     const centroFaixa = (ints[0][0] + ints[ints.length - 1][1]) / 2;
     const faixaRef = faixaMaisProxima(ints, centroFaixa);
     if (!faixaRef) continue;
     const [fMinRef, fMaxRef] = faixaRef;
     if (!(fMaxRef > 0) || !(fMinRef > 0) || fMaxRef <= fMinRef) continue;
 
-    // Consome sempre um `rand()` para preservar a sequência
-    // pseudoaleatória de durações/envelopes/grãos.
     const r1 = rand();
 
-    // Altura pretendida:
-    //  - série ativa e token válido → usa a série
-    //  - caso contrário, sorteio normal
     let f = null;
     let usadoSerie = false;
     if (serieAtiva && serieValores.length) {
@@ -342,7 +278,6 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       if (token != null) {
         const candidata = alturaDaSerie(token, cam, ints, rSerie, midiAnterior);
         if (candidata != null) {
-          // Guarda o MIDI efetivo para o modo 'classe proxima'
           midiAnterior = hzParaMidi(candidata);
           f = candidata;
           usadoSerie = true;
@@ -350,7 +285,6 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       }
     }
     if (!usadoSerie) {
-      // Sorteio normal dentro da faixa de referência.
       if (cam.tipoObjeto === 'gliss') {
         const k = (i % 8) / 7;
         f = fMinRef + (fMaxRef - fMinRef) * (r1 * 0.2 + k * 0.8);
@@ -361,10 +295,8 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       midiAnterior = hzParaMidi(f);
     }
 
-    // Avança o contador de ataques (só quando houve ataque).
     idxAtaque++;
 
-    // Duração: consome um rand() a mais, exatamente como antes.
     const rDur = rand();
     let dur;
     if (cam.tipoObjeto === 'granular') dur = passo * (0.05 + rDur * 0.15);
@@ -384,7 +316,6 @@ export function gerarEventosCamada(cam, duracaoTotal) {
     });
   }
 
-  // Granular: nuvem em torno do centro (série) ± dispersão.
   if (cam.tipoObjeto === 'granular') {
     const nuvem = [];
     for (const e of ev.slice()) {
@@ -396,7 +327,6 @@ export function gerarEventosCamada(cam, duracaoTotal) {
         const faixa = faixaMaisProxima(ints, e.f);
         if (!faixa) continue;
         const [fMin, fMax] = faixa;
-        // Grão = centro (e.f) ± dispersão, recortado pela faixa.
         const desloc = (rand() * 2 - 1) * DISPERSAO_GRANULAR_ST;
         let fg = midiParaHz(hzParaMidi(e.f) + desloc);
         if (fg < fMin) fg = fMin;
@@ -405,9 +335,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
         const durG = 0.02 + rand() * 0.06;
         const envG = sortearEnvelope(envBase, envBase.rigor, rEnv);
         nuvem.push({
-          t: tG,
-          f: fg,
-          dur: durG,
+          t: tG, f: fg, dur: durG,
           tipoObjeto: 'granular',
           timbre: cam.timbre,
           vol: e.vol * (0.4 + rand() * 0.6),
@@ -428,37 +356,27 @@ export function gerarEventosCamada(cam, duracaoTotal) {
 function agendarEnvelope(ctx, dest, env, t0, dur, pico) {
   const g = ctx.createGain();
   g.connect(dest);
-
   const peak = Math.max(0.0001, pico);
   const piso = 0.0001;
-
   const A = Math.max(0, (env.a || 0) / 100) * dur;
   const D = Math.max(0, (env.d || 0) / 100) * dur;
   const S = Math.max(0, (env.s || 0) / 100) * dur;
   const R = Math.max(0, (env.r || 0) / 100) * dur;
-
   const aMin = 0.002, rMin = 0.002;
   const A2 = Math.max(aMin, A);
   const R2 = Math.max(rMin, R);
   let ta = t0 + A2;
   let tr = t0 + dur - R2;
-  if (tr < ta) {
-    const meio = t0 + dur / 2;
-    ta = meio;
-    tr = meio;
-  }
+  if (tr < ta) { const meio = t0 + dur / 2; ta = meio; tr = meio; }
   const td = Math.min(tr, ta + D);
   const ts = Math.max(td, tr);
-
   const sustain = Math.max(piso, peak * (env.nivelSustain != null ? env.nivelSustain : 0.7));
-
   g.gain.setValueAtTime(piso, t0);
   if (ta > t0) g.gain.exponentialRampToValueAtTime(peak, ta);
   else g.gain.setValueAtTime(peak, t0);
   if (td > ta) g.gain.exponentialRampToValueAtTime(Math.max(piso, sustain), td);
   if (ts > td) g.gain.setValueAtTime(Math.max(piso, sustain), ts);
   if (t0 + dur > ts) g.gain.exponentialRampToValueAtTime(piso, t0 + dur);
-
   return g;
 }
 
@@ -473,22 +391,16 @@ export function sintetizarEvento(ctx, dest, ev) {
   const env = ev.env || { a: 5, d: 10, s: 70, r: 15, nivelSustain: 0.7, rigor: 100 };
 
   const envNode = agendarEnvelope(ctx, dest, env, t0, dur, peak);
-
   const tipoObjeto = ev.tipoObjeto || 'nota';
   const timbre = ev.timbre || { tipo: 'sine' };
 
-  if (tipoObjeto === 'ruido') {
-    sintetizarRuidoFiltrado(ctx, envNode, ev, t0, t1);
-    return;
-  }
+  if (tipoObjeto === 'ruido') { sintetizarRuidoFiltrado(ctx, envNode, ev, t0, t1); return; }
 
   const freqBase = ev.f;
-
   const criarVoz = (freq, timbre, t0, t1, deslizar) => {
     const saida = ctx.createGain();
     saida.gain.value = 1;
     saida.connect(envNode);
-
     if (timbre.tipo === 'sine') {
       const o = ctx.createOscillator();
       o.type = 'sine';
@@ -601,7 +513,6 @@ export function calcularEventos(projeto, somenteCamadaId = null) {
       if (soloGlobal && !cam.solo) continue;
     }
     if (cam.vertices.length < 3) continue;
-
     const evs = gerarEventosCamada(cam, projeto.duracaoTotal);
     eventosPorCamada.set(cam.id, evs);
   }
@@ -616,7 +527,6 @@ export function calcularEventos(projeto, somenteCamadaId = null) {
       atingidos = aplicarRelacoes(eventosPorCamada, relacoesAtivas, camadasPorId);
     }
   }
-
   return { eventos: eventosPorCamada, atingidos };
 }
 
@@ -633,12 +543,10 @@ export function criarGrafo(ctx, projeto, opcoes = {}) {
   reverbGain.gain.value = 0.9;
   convolver.connect(reverbGain);
   reverbGain.connect(master);
-
   master.connect(ctx.destination);
 
   const camadas = new Map();
   const soloGlobal = projeto.camadas.some(c => c.solo);
-
   for (const cam of projeto.camadas) {
     if (opcoes.somenteCamadaId) {
       if (cam.id !== opcoes.somenteCamadaId) continue;
@@ -648,25 +556,16 @@ export function criarGrafo(ctx, projeto, opcoes = {}) {
     }
     if (cam.vertices.length < 3) continue;
 
-    const dinamica = ctx.createGain();
-    dinamica.gain.value = 1.0;
-
-    const g = ctx.createGain();
-    g.gain.value = cam.volume != null ? cam.volume : 0.8;
-
-    const pan = ctx.createStereoPanner();
-    pan.pan.value = 0;
-
-    const send = ctx.createGain();
-    send.gain.value = 0;
+    const dinamica = ctx.createGain(); dinamica.gain.value = 1.0;
+    const g = ctx.createGain(); g.gain.value = cam.volume != null ? cam.volume : 0.8;
+    const pan = ctx.createStereoPanner(); pan.pan.value = 0;
+    const send = ctx.createGain(); send.gain.value = 0;
 
     dinamica.connect(g);
     g.connect(pan); pan.connect(master);
     g.connect(send); send.connect(convolver);
-
     camadas.set(cam.id, { dinamica, gain: g, panner: pan, send });
   }
-
   return { master, convolver, reverbGain, camadas };
 }
 
@@ -680,36 +579,28 @@ export function agendarEventos(ctx, projeto, eventos, grafo, opcoes = {}) {
     if (!nos) continue;
     const evs = eventos.get(cam.id);
     if (!evs) continue;
-
     for (const ev of evs) {
       if (ev.t < deTempo - 1e-6) continue;
       if (ev.t >= janelaAte) continue;
       const tAbs = inicioCtx + ev.t;
-      try {
-        sintetizarEvento(ctx, nos.dinamica, { ...ev, t: tAbs });
-      } catch (_) {}
+      try { sintetizarEvento(ctx, nos.dinamica, { ...ev, t: tAbs }); } catch (_) {}
     }
   }
-
   agendarAutomacoes(ctx, projeto, grafo.camadas, inicioCtx, deTempo, janelaAte);
 }
 
 function agendarAutomacoes(ctx, projeto, camadas, inicioCtx, deTempo, janelaAte) {
   const PASSO = 0.03;
-
   for (const cam of projeto.camadas) {
     const nos = camadas.get(cam.id);
     if (!nos) continue;
-
     const tIni = Math.max(0, deTempo);
     const tFim = isFinite(janelaAte) ? janelaAte : projeto.duracaoTotal;
-
     for (let t = tIni; t <= tFim + 1e-9; t += PASSO) {
       const tAbs = inicioCtx + t;
       const din = valorAutomacao(cam, 'dinamica', t);
       const panNorm = valorAutomacao(cam, 'panorama', t);
       const rev = valorAutomacao(cam, 'reverb', t);
-
       try { nos.dinamica.gain.linearRampToValueAtTime(Math.max(0.0001, din), tAbs); } catch(_){}
       try { nos.panner.pan.linearRampToValueAtTime(panNorm * 2 - 1, tAbs); } catch(_){}
       try { nos.send.gain.linearRampToValueAtTime(rev * 0.8, tAbs); } catch(_){}
@@ -737,16 +628,13 @@ export const motor = {
   analisador: null,
   eventosPorCamada: new Map(),
   atingidos: new Map(),
-
   tocando: false,
   pausado: false,
   tInicio: 0,
   tPausa: 0,
   modo: null,
-
   timerJanela: null,
   timerAnimacao: null,
-
   JANELA_S: 4.0,
   INTERVALO_MS: 250,
   _janelaAte: 0,
@@ -875,7 +763,6 @@ export const motor = {
       if (typeof cb === 'function') cb();
       return;
     }
-
     this.timerJanela = setTimeout(() => this._agendarJanela(), this.INTERVALO_MS);
   },
 
@@ -933,19 +820,11 @@ function atualizarMedidor(analisador) {
 export async function tocarSomenteSelecionada() {
   const cam = camadaSelecionada();
   if (!cam || cam.vertices.length < 3) return false;
-
   const t0 = Math.max(0, Math.min(...cam.vertices.map(v => v.t)));
   const t1 = Math.min(estado.projeto.duracaoTotal, Math.max(...cam.vertices.map(v => v.t)));
   if (t1 <= t0) return false;
-
-  await motor.play(t0, {
-    somenteCamadaId: cam.id,
-    ate: t1 + CAUDA_CAMADA_S,
-  });
-
-  if (typeof window.__rolarParaTempo === 'function') {
-    window.__rolarParaTempo(t0);
-  }
+  await motor.play(t0, { somenteCamadaId: cam.id, ate: t1 + CAUDA_CAMADA_S });
+  if (typeof window.__rolarParaTempo === 'function') window.__rolarParaTempo(t0);
   return true;
 }
 

@@ -54,7 +54,10 @@ export function normalizarEnvelope(env) {
   return e;
 }
 
-/** Série de alturas padrão. */
+/** Série de alturas padrão.
+ *  `ativa` é mantido por compatibilidade com projetos antigos, mas
+ *  NÃO controla mais nada. Quem decide usar a série é
+ *  `quantizacaoAltura.modo === 'serie'`. */
 export function serieAlturasPadrao() {
   return { ativa: false, texto: '', modo: 'absoluta', oitava: 'proxima' };
 }
@@ -75,9 +78,8 @@ export function criarCamada(vertices = []) {
     densidadeRitmica: 1,
     padraoRitmico: [1, 0, 1, 1],
     semente: Math.floor(Math.random() * 100000),
+    // 'livre' | 'semitons' | 'conjunto' | 'serie'
     quantizacaoAltura: { modo: 'livre' },
-    // Série de alturas (item 5): texto com tokens (nomes, MIDI, Hz,
-    // ou `*` para altura livre).
     serieAlturas: serieAlturasPadrao(),
     automacoes: { dinamica: [], panorama: [], reverb: [] },
     mudo: false,
@@ -114,11 +116,6 @@ export function valorAutomacao(cam, tipo, t) {
   return a.v + (b.v - a.v) * k;
 }
 
-/**
- * Extensão temporal do polígono: menor e maior `t` entre os vértices,
- * com `t0` nunca negativo. Devolve `null` se a camada tem menos de
- * 3 vértices.
- */
 export function extensaoTemporal(cam) {
   if (!cam || !Array.isArray(cam.vertices) || cam.vertices.length < 3) return null;
   let t0 = Infinity, t1 = -Infinity;
@@ -230,13 +227,23 @@ function migrarCamada(c) {
   if (c.envelope && typeof c.envelope === 'object') {
     base.envelope = normalizarEnvelope({ ...base.envelope, ...c.envelope });
   }
+  // quantizacaoAltura: aceita string antiga ou objeto novo. Também
+  // converte `serieAlturas.ativa === true` em `modo:'serie'`.
   if (typeof c.quantizacaoAltura === 'string') {
     base.quantizacaoAltura = { modo: c.quantizacaoAltura };
   } else if (c.quantizacaoAltura && typeof c.quantizacaoAltura === 'object') {
     base.quantizacaoAltura = { ...base.quantizacaoAltura, ...c.quantizacaoAltura };
   }
+  // Mescla série (mantém por compatibilidade).
   if (c.serieAlturas && typeof c.serieAlturas === 'object') {
     base.serieAlturas = { ...serieAlturasPadrao(), ...c.serieAlturas };
+  }
+  // Compatibilidade retroativa: projeto antigo tinha `serieAlturas.ativa`
+  // controlando a série, e a quantização `livre`. Convertemos para modo.
+  if (base.serieAlturas && base.serieAlturas.ativa === true &&
+      base.quantizacaoAltura.modo !== 'serie') {
+    base.quantizacaoAltura = { modo: 'serie' };
+    base.serieAlturas.ativa = false;
   }
   if (c.automacoes && typeof c.automacoes === 'object') {
     base.automacoes = {
