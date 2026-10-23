@@ -1,17 +1,33 @@
 // ============================================================
-// audio.js — Motor de áudio + grafo reutilizável (online/offline)
+// audio.js — Motor de áudio
 // ============================================================
 //
-// Rodada 5: a série de alturas passa a ser UM MODO de quantização
-// (`quantizacaoAltura.modo === 'serie'`), e não mais uma flag
-// separada (`serieAlturas.ativa`).
+// Tipos de objeto:
+//  - 'nota'     → ataques pulsados (grid do passo rítmico)
+//  - 'gliss'    → ataques com trajetória descendente/ascendente
+//  - 'continuo' → um único evento cobrindo [tMin, tMax] do polígono
+//
+// Timbres:
+//  - 'sine', 'aditiva', 'fm', 'granular', 'ruido'
+//
+// A duração de cada evento em 'nota' e 'gliss' é:
+//   durBase = passo * multiplicadorDuracao
+//   se aleatoriedadeDuracao > 0:
+//     fator ∈ [1-k, 1+k], k = aleatoriedadeDuracao/100
+//     dur = durBase * fator
+//   senão dur = durBase
+//   trunca por tMax com piso 0.01 s.
+// ============================================================
 
 import { estado, camadaSelecionada, valorAutomacao } from './model.js';
 import { aplicarRelacoes } from './relations.js';
 import { parseSerie } from './serie.js';
 
 export const CAUDA_CAMADA_S = 0;
-export const DISPERSAO_GRANULAR_ST = 1;
+
+// Número de osciladores por oitava no cluster senoidal/aditivo
+// do som contínuo.
+export const SENOIDES_POR_OITAVA = 6;
 
 // ------------------------------------------------------------
 // PRNG
@@ -34,7 +50,7 @@ export function hzParaMidi(f) { return 69 + 12 * Math.log2(f / 440); }
 
 export function quantizar(f, quant) {
   if (!quant || quant.modo === 'livre' || quant.modo === 'serie') return f;
-  let m = Math.round(hzParaMidi(f));
+  const m = Math.round(hzParaMidi(f));
   if (quant.modo === 'semitons') return midiParaHz(m);
   if (quant.modo === 'conjunto') {
     const classes = quant.classes && quant.classes.length ? quant.classes : [0,2,4,5,7,9,11];
@@ -50,9 +66,6 @@ export function quantizar(f, quant) {
   return f;
 }
 
-// ------------------------------------------------------------
-// Helpers puros de polígono/altura
-// ------------------------------------------------------------
 export function transporPorOitava(f, fMin, fMax) {
   if (!(f > 0) || !(fMin > 0) || !(fMax >= fMin)) return null;
   const kMin = Math.ceil(Math.log2(fMin / f) - 1e-9);
@@ -88,16 +101,12 @@ export function ajustarAoPoligono(f, faixa, quant, opcoes = {}) {
   if (!(fMin > 0) || !(fMax >= fMin)) return { f, ajuste: 'nenhum' };
   let alvo = f;
   if (quantizarAntes) alvo = quantizar(alvo, quant);
-  if (alvo >= fMin * 0.999 && alvo <= fMax * 1.001) {
-    return { f: alvo, ajuste: 'nenhum' };
-  }
+  if (alvo >= fMin * 0.999 && alvo <= fMax * 1.001) return { f: alvo, ajuste: 'nenhum' };
   const oit = transporPorOitava(alvo, fMin, fMax);
   if (oit != null) {
     if (quantizarAntes) {
       const q = quantizar(oit, quant);
-      if (q >= fMin * 0.999 && q <= fMax * 1.001) {
-        return { f: q, ajuste: 'oitava' };
-      }
+      if (q >= fMin * 0.999 && q <= fMax * 1.001) return { f: q, ajuste: 'oitava' };
     }
     return { f: oit, ajuste: 'oitava' };
   }
@@ -123,9 +132,7 @@ export function intervalosVerticaisEm(vertices, t) {
   if (fInts.length < 2) return [];
   fInts.sort((x, y) => x - y);
   const out = [];
-  for (let i = 0; i + 1 < fInts.length; i += 2) {
-    out.push([fInts[i], fInts[i + 1]]);
-  }
+  for (let i = 0; i + 1 < fInts.length; i += 2) out.push([fInts[i], fInts[i + 1]]);
   return out;
 }
 
@@ -133,6 +140,19 @@ export function faixaVerticalEm(vertices, t) {
   const ints = intervalosVerticaisEm(vertices, t);
   if (!ints.length) return null;
   return [ints[0][0], ints[ints.length - 1][1]];
+}
+
+/** Faixa (fMin, fMax) “principal” para o som contínuo em t.
+ *  Se o polígono for côncavo, escolhe a faixa mais larga. */
+function faixaPrincipalEm(vertices, t) {
+  const ints = intervalosVerticaisEm(vertices, t);
+  if (!ints.length) return null;
+  let melhor = ints[0], melhorLarg = ints[0][1] - ints[0][0];
+  for (const [a, b] of ints) {
+    const L = b - a;
+    if (L > melhorLarg) { melhorLarg = L; melhor = [a, b]; }
+  }
+  return melhor;
 }
 
 function faixaMaisProxima(ints, fAlvo) {
@@ -146,15 +166,12 @@ function faixaMaisProxima(ints, fAlvo) {
 }
 
 // ------------------------------------------------------------
-// Envelope
+// Envelope ADSR
 // ------------------------------------------------------------
 function sortearEnvelope(base, rigor, rEnv) {
   if (rigor >= 100) return { ...base };
-  const u1 = rEnv() * 2 - 1;
-  const u2 = rEnv() * 2 - 1;
-  const u3 = rEnv() * 2 - 1;
-  const u4 = rEnv() * 2 - 1;
-  const fator = (1 - rigor / 100);
+  const u1 = rEnv()*2-1, u2 = rEnv()*2-1, u3 = rEnv()*2-1, u4 = rEnv()*2-1;
+  const fator = 1 - rigor / 100;
   const a = Math.max(0, base.a * (1 + fator * u1));
   const d = Math.max(0, base.d * (1 + fator * u2));
   const s = Math.max(0, base.s * (1 + fator * u3));
@@ -162,10 +179,64 @@ function sortearEnvelope(base, rigor, rEnv) {
   const soma = a + d + s + r;
   if (soma <= 0) return { ...base };
   const k = 100 / soma;
-  const us = rEnv() * 2 - 1;
-  const nivelSustain = Math.min(1, Math.max(0,
-    base.nivelSustain * (1 + fator * us)));
-  return { a: a * k, d: d * k, s: s * k, r: r * k, nivelSustain, rigor };
+  const us = rEnv()*2-1;
+  const nivelSustain = Math.min(1, Math.max(0, base.nivelSustain * (1 + fator * us)));
+  return { a: a*k, d: d*k, s: s*k, r: r*k, nivelSustain, rigor };
+}
+
+function agendarEnvelope(ctx, dest, env, t0, dur, pico) {
+  const g = ctx.createGain();
+  g.connect(dest);
+  const peak = Math.max(0.0001, pico);
+  const piso = 0.0001;
+  const A = Math.max(0, (env.a || 0) / 100) * dur;
+  const D = Math.max(0, (env.d || 0) / 100) * dur;
+  const S = Math.max(0, (env.s || 0) / 100) * dur;
+  const R = Math.max(0, (env.r || 0) / 100) * dur;
+  const aMin = 0.002, rMin = 0.002;
+  const A2 = Math.max(aMin, A);
+  const R2 = Math.max(rMin, R);
+  let ta = t0 + A2;
+  let tr = t0 + dur - R2;
+  if (tr < ta) { const m = t0 + dur/2; ta = m; tr = m; }
+  const td = Math.min(tr, ta + D);
+  const ts = Math.max(td, tr);
+  const sustain = Math.max(piso, peak * (env.nivelSustain != null ? env.nivelSustain : 0.7));
+  g.gain.setValueAtTime(piso, t0);
+  if (ta > t0) g.gain.exponentialRampToValueAtTime(peak, ta);
+  else g.gain.setValueAtTime(peak, t0);
+  if (td > ta) g.gain.exponentialRampToValueAtTime(Math.max(piso, sustain), td);
+  if (ts > td) g.gain.setValueAtTime(Math.max(piso, sustain), ts);
+  if (t0 + dur > ts) g.gain.exponentialRampToValueAtTime(piso, t0 + dur);
+  return g;
+}
+
+// Envelope específico do grão (suavização em 0..100).
+//  100%: A=50%, S=0%, R=50% (triangular)
+//   50%: A=25%, S=50%, R=25%
+//    0%: A=R=~0% (retangular)
+function envelopeGrao(ctx, dest, t0, durGrao, suavizacao) {
+  const g = ctx.createGain();
+  g.connect(dest);
+  const piso = 0.0001;
+  const pico = 1.0;
+  const s = Math.min(100, Math.max(0, suavizacao)) / 100;
+  // A = metade de s (máx 50%), S = 1 - s, R = metade de s.
+  const A = (0.5 * s) * durGrao;
+  const R = (0.5 * s) * durGrao;
+  const S = Math.max(0, durGrao - A - R);
+  const aMin = 0.0005, rMin = 0.0005;
+  const A2 = Math.max(aMin, A);
+  const R2 = Math.max(rMin, R);
+  const tS0 = t0 + A2;
+  const tS1 = t0 + durGrao - R2;
+  g.gain.setValueAtTime(piso, t0);
+  if (A2 > aMin) g.gain.linearRampToValueAtTime(pico, tS0);
+  else g.gain.setValueAtTime(pico, t0);
+  if (S > 0 && tS1 > tS0) g.gain.setValueAtTime(pico, tS1);
+  if (R2 > rMin) g.gain.linearRampToValueAtTime(piso, t0 + durGrao);
+  else g.gain.setValueAtTime(piso, t0 + durGrao);
+  return g;
 }
 
 // ------------------------------------------------------------
@@ -175,33 +246,24 @@ function alturaDaSerie(entradaMidi, cam, ints, rSerie, midiAnterior) {
   if (ints.length === 0) return null;
   const serie = cam.serieAlturas || { modo: 'absoluta', oitava: 'proxima' };
   const modo = serie.modo || 'absoluta';
-
   const alvoHz = midiParaHz(entradaMidi);
   const faixa = faixaMaisProxima(ints, alvoHz);
   if (!faixa) return null;
   const [fMin, fMax] = faixa;
 
   if (modo === 'absoluta') {
-    const { f } = ajustarAoPoligono(
-      midiParaHz(entradaMidi), faixa, cam.quantizacaoAltura,
-      { quantizarAntes: false }
-    );
+    const { f } = ajustarAoPoligono(midiParaHz(entradaMidi), faixa,
+      cam.quantizacaoAltura, { quantizarAntes: false });
     return f;
   }
-
   const classe = ((Math.round(entradaMidi) % 12) + 12) % 12;
   const mTop = Math.floor(hzParaMidi(fMax));
   const mBase = Math.ceil(hzParaMidi(fMin));
-
   if (serie.oitava === 'aleatoria') {
-    const candidatos = [];
-    for (let m = mBase; m <= mTop; m++) {
-      if ((((m % 12) + 12) % 12) === classe) candidatos.push(m);
-    }
-    if (candidatos.length) {
-      const idx = Math.floor(rSerie() * candidatos.length);
-      return midiParaHz(candidatos[idx]);
-    }
+    const cands = [];
+    for (let m = mBase; m <= mTop; m++)
+      if ((((m % 12) + 12) % 12) === classe) cands.push(m);
+    if (cands.length) return midiParaHz(cands[Math.floor(rSerie() * cands.length)]);
   } else {
     const centro = (mBase + mTop) / 2;
     const ref = (midiAnterior != null) ? midiAnterior : centro;
@@ -228,20 +290,22 @@ export function gerarEventosCamada(cam, duracaoTotal) {
   const rand = prng(cam.semente);
   const rEnv = prng((cam.semente ^ 0xA5A5A5A5) >>> 0);
   const rSerie = prng((cam.semente ^ 0x51ED270B) >>> 0);
+  const rDur = prng((cam.semente ^ 0x8BADF00D) >>> 0);
 
   const bpm = cam.andamento > 0 ? cam.andamento : 120;
   const pulsoSeg = cam.pulso > 0 ? cam.pulso : (60 / bpm);
   const dens = Math.max(0.1, cam.densidadeRitmica || 1);
+  const passo = pulsoSeg / dens;
   const padrao = (cam.padraoRitmico && cam.padraoRitmico.length) ? cam.padraoRitmico : [1];
-  const envBase = cam.envelope || { a: 5, d: 10, s: 70, r: 15, nivelSustain: 0.7, rigor: 100 };
+  const envBase = cam.envelope || { a:5, d:10, s:70, r:15, nivelSustain:0.7, rigor:100 };
 
-  // Série ativa = modo de quantização 'serie' com texto não vazio.
+  const multDur = Math.max(0.1, Math.min(10, cam.multiplicadorDuracao ?? 1));
+  const aleatDur = Math.max(0, Math.min(100, cam.aleatoriedadeDuracao ?? 0));
+  const kDur = aleatDur / 100;
+
   const serieAtiva = cam.quantizacaoAltura && cam.quantizacaoAltura.modo === 'serie'
     && cam.serieAlturas && (cam.serieAlturas.texto || '').trim().length > 0;
-  let serieValores = [];
-  if (serieAtiva) {
-    serieValores = parseSerie(cam.serieAlturas.texto).valores;
-  }
+  const serieValores = serieAtiva ? parseSerie(cam.serieAlturas.texto).valores : [];
   let idxAtaque = 0;
   let midiAnterior = null;
 
@@ -251,7 +315,35 @@ export function gerarEventosCamada(cam, duracaoTotal) {
   const t1 = Math.min(duracaoTotal, tMax);
   if (t1 <= t0) return ev;
 
-  const passo = pulsoSeg / dens;
+  // ---- Som contínuo: um único evento ----
+  if (cam.tipoObjeto === 'continuo') {
+    const faixaIni = faixaPrincipalEm(cam.vertices, t0);
+    if (!faixaIni) return ev;
+    let fCentro = (faixaIni[0] + faixaIni[1]) / 2;
+    // série, se ativa, desloca o centro a partir de uma nota MIDI.
+    if (serieAtiva && serieValores.length) {
+      const token = serieValores[0];
+      if (token != null) {
+        const cand = alturaDaSerie(token, cam, [faixaIni], rSerie, null);
+        if (cand != null) fCentro = cand;
+      }
+    }
+    const envEv = sortearEnvelope(envBase, envBase.rigor, rEnv);
+    ev.push({
+      t: t0,
+      f: fCentro,
+      dur: t1 - t0,
+      tipoObjeto: 'continuo',
+      timbre: cam.timbre || { tipo: 'sine' },
+      vol: cam.volume != null ? cam.volume : 0.8,
+      env: envEv,
+      // guardamos os vértices para a automação de fMin/fMax na síntese.
+      _vertices: cam.vertices,
+    });
+    return ev;
+  }
+
+  // ---- Nota / gliss: ataques pulsados ----
   const nSlots = Math.max(1, Math.floor((t1 - t0) / passo));
   let idxPadrao = 0;
 
@@ -276,12 +368,8 @@ export function gerarEventosCamada(cam, duracaoTotal) {
     if (serieAtiva && serieValores.length) {
       const token = serieValores[idxAtaque % serieValores.length];
       if (token != null) {
-        const candidata = alturaDaSerie(token, cam, ints, rSerie, midiAnterior);
-        if (candidata != null) {
-          midiAnterior = hzParaMidi(candidata);
-          f = candidata;
-          usadoSerie = true;
-        }
+        const cand = alturaDaSerie(token, cam, ints, rSerie, midiAnterior);
+        if (cand != null) { midiAnterior = hzParaMidi(cand); f = cand; usadoSerie = true; }
       }
     }
     if (!usadoSerie) {
@@ -294,16 +382,16 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       f = quantizar(f, cam.quantizacaoAltura);
       midiAnterior = hzParaMidi(f);
     }
-
     idxAtaque++;
 
-    const rDur = rand();
-    let dur;
-    if (cam.tipoObjeto === 'granular') dur = passo * (0.05 + rDur * 0.15);
-    else if (cam.tipoObjeto === 'gliss') dur = passo * (0.9 + rDur * 0.5);
-    else if (cam.tipoObjeto === 'ruido') dur = passo * (0.5 + rDur * 0.5);
-    else dur = passo * (0.6 + rDur * 0.4);
-    if (t + dur > tMax) dur = Math.max(0.02, tMax - t);
+    // Duração: passo * multiplicador, com aleatoriedade simétrica.
+    const durBase = passo * multDur;
+    let dur = durBase;
+    if (kDur > 0) {
+      const fator = 1 + kDur * (rDur() * 2 - 1);
+      dur = durBase * fator;
+    }
+    if (t + dur > tMax) dur = Math.max(0.01, tMax - t);
 
     const envEv = sortearEnvelope(envBase, envBase.rigor, rEnv);
 
@@ -316,166 +404,284 @@ export function gerarEventosCamada(cam, duracaoTotal) {
     });
   }
 
-  if (cam.tipoObjeto === 'granular') {
-    const nuvem = [];
-    for (const e of ev.slice()) {
-      const nGraos = 6 + Math.floor(rand() * 6);
-      for (let k = 0; k < nGraos; k++) {
-        const tG = e.t + rand() * e.dur;
-        const ints = intervalosVerticaisEm(cam.vertices, tG);
-        if (!ints.length) continue;
-        const faixa = faixaMaisProxima(ints, e.f);
-        if (!faixa) continue;
-        const [fMin, fMax] = faixa;
-        const desloc = (rand() * 2 - 1) * DISPERSAO_GRANULAR_ST;
-        let fg = midiParaHz(hzParaMidi(e.f) + desloc);
-        if (fg < fMin) fg = fMin;
-        if (fg > fMax) fg = fMax;
-        fg = quantizar(fg, cam.quantizacaoAltura);
-        const durG = 0.02 + rand() * 0.06;
-        const envG = sortearEnvelope(envBase, envBase.rigor, rEnv);
-        nuvem.push({
-          t: tG, f: fg, dur: durG,
-          tipoObjeto: 'granular',
-          timbre: cam.timbre,
-          vol: e.vol * (0.4 + rand() * 0.6),
-          env: envG,
-        });
-      }
-    }
-    ev.push(...nuvem);
-  }
-
   ev.sort((a, b) => a.t - b.t);
   return ev;
 }
 
 // ------------------------------------------------------------
-// Envelope ADSR
-// ------------------------------------------------------------
-function agendarEnvelope(ctx, dest, env, t0, dur, pico) {
-  const g = ctx.createGain();
-  g.connect(dest);
-  const peak = Math.max(0.0001, pico);
-  const piso = 0.0001;
-  const A = Math.max(0, (env.a || 0) / 100) * dur;
-  const D = Math.max(0, (env.d || 0) / 100) * dur;
-  const S = Math.max(0, (env.s || 0) / 100) * dur;
-  const R = Math.max(0, (env.r || 0) / 100) * dur;
-  const aMin = 0.002, rMin = 0.002;
-  const A2 = Math.max(aMin, A);
-  const R2 = Math.max(rMin, R);
-  let ta = t0 + A2;
-  let tr = t0 + dur - R2;
-  if (tr < ta) { const meio = t0 + dur / 2; ta = meio; tr = meio; }
-  const td = Math.min(tr, ta + D);
-  const ts = Math.max(td, tr);
-  const sustain = Math.max(piso, peak * (env.nivelSustain != null ? env.nivelSustain : 0.7));
-  g.gain.setValueAtTime(piso, t0);
-  if (ta > t0) g.gain.exponentialRampToValueAtTime(peak, ta);
-  else g.gain.setValueAtTime(peak, t0);
-  if (td > ta) g.gain.exponentialRampToValueAtTime(Math.max(piso, sustain), td);
-  if (ts > td) g.gain.setValueAtTime(Math.max(piso, sustain), ts);
-  if (t0 + dur > ts) g.gain.exponentialRampToValueAtTime(piso, t0 + dur);
-  return g;
-}
-
-// ------------------------------------------------------------
-// Síntese
+// Síntese de um evento
 // ------------------------------------------------------------
 export function sintetizarEvento(ctx, dest, ev) {
   const t0 = ev.t;
   const dur = Math.max(0.005, ev.dur);
   const t1 = t0 + dur;
   const peak = Math.max(0.0001, ev.vol);
-  const env = ev.env || { a: 5, d: 10, s: 70, r: 15, nivelSustain: 0.7, rigor: 100 };
-
+  const env = ev.env || { a:5, d:10, s:70, r:15, nivelSustain:0.7, rigor:100 };
   const envNode = agendarEnvelope(ctx, dest, env, t0, dur, peak);
+
   const tipoObjeto = ev.tipoObjeto || 'nota';
   const timbre = ev.timbre || { tipo: 'sine' };
 
-  if (tipoObjeto === 'ruido') { sintetizarRuidoFiltrado(ctx, envNode, ev, t0, t1); return; }
-
-  const freqBase = ev.f;
-  const criarVoz = (freq, timbre, t0, t1, deslizar) => {
-    const saida = ctx.createGain();
-    saida.gain.value = 1;
-    saida.connect(envNode);
-    if (timbre.tipo === 'sine') {
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.setValueAtTime(freq, t0);
-      if (deslizar) o.frequency.linearRampToValueAtTime(freq * 0.98, t1);
-      o.connect(saida);
-      o.start(t0); o.stop(t1);
-    } else if (timbre.tipo === 'aditiva') {
-      const n = Math.max(1, Math.min(32, timbre.nHarm || 6));
-      const incl = timbre.inclinacao || 1.5;
-      for (let h = 1; h <= n; h++) {
-        const o = ctx.createOscillator();
-        o.type = 'sine';
-        o.frequency.setValueAtTime(freq * h, t0);
-        if (deslizar) o.frequency.linearRampToValueAtTime(freq * h * 0.98, t1);
-        const g = ctx.createGain();
-        g.gain.value = 1 / Math.pow(h, incl);
-        o.connect(g); g.connect(saida);
-        o.start(t0); o.stop(t1);
-      }
-    } else if (timbre.tipo === 'fm') {
-      const razao = timbre.razao || 2;
-      const indice = timbre.indice || 3;
-      const carrier = ctx.createOscillator();
-      carrier.type = 'sine';
-      carrier.frequency.setValueAtTime(freq, t0);
-      const mod = ctx.createOscillator();
-      mod.type = 'sine';
-      mod.frequency.setValueAtTime(freq * razao, t0);
-      const modGain = ctx.createGain();
-      modGain.gain.value = freq * indice;
-      mod.connect(modGain); modGain.connect(carrier.frequency);
-      carrier.connect(saida);
-      mod.start(t0); carrier.start(t0);
-      mod.stop(t1); carrier.stop(t1);
-    } else {
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.setValueAtTime(freq, t0);
-      o.connect(saida);
-      o.start(t0); o.stop(t1);
-    }
-    return saida;
-  };
-
-  if (tipoObjeto === 'gliss') {
-    const o = ctx.createOscillator();
-    o.type = 'sine';
-    o.frequency.setValueAtTime(freqBase, t0);
-    o.frequency.linearRampToValueAtTime(freqBase * (0.5 + 0.5 * Math.abs(Math.sin(freqBase))), t1);
-    const g = ctx.createGain();
-    g.gain.value = 1;
-    o.connect(g); g.connect(envNode);
-    o.start(t0); o.stop(t1);
-  } else {
-    criarVoz(freqBase, timbre, t0, t1, tipoObjeto === 'nota');
+  // ---------- Som contínuo ----------
+  if (tipoObjeto === 'continuo') {
+    sintetizarContinuo(ctx, envNode, ev, t0, t1, timbre);
+    return;
   }
+
+  // ---------- Ataques (nota / gliss) ----------
+  // Escolhe o timbre. O tipo de objeto apenas dá o contorno temporal.
+  if (timbre.tipo === 'granular') {
+    sintetizarGranularAtaque(ctx, envNode, ev, t0, t1, timbre);
+    return;
+  }
+  if (timbre.tipo === 'ruido') {
+    sintetizarRuidoAtaque(ctx, envNode, ev, t0, t1, timbre);
+    return;
+  }
+  if (tipoObjeto === 'gliss') {
+    sintetizarGliss(ctx, envNode, ev, t0, t1);
+    return;
+  }
+  // nota + sine/aditiva/fm
+  sintetizarNota(ctx, envNode, ev, t0, t1, timbre);
 }
 
-function sintetizarRuidoFiltrado(ctx, dest, ev, t0, t1) {
+// ------------------------------------------------------------
+// Síntese: nota / gliss (timbres senoidal, aditivo, FM)
+// ------------------------------------------------------------
+function sintetizarNota(ctx, dest, ev, t0, t1, timbre) {
+  const f = ev.f;
+  if (timbre.tipo === 'aditiva') {
+    const n = Math.max(1, Math.min(32, timbre.nHarm || 6));
+    const incl = timbre.inclinacao || 1.5;
+    const soma = ctx.createGain();
+    soma.gain.value = 1;
+    soma.connect(dest);
+    for (let h = 1; h <= n; h++) {
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(f * h, t0);
+      const g = ctx.createGain();
+      g.gain.value = 1 / Math.pow(h, incl);
+      o.connect(g); g.connect(soma);
+      o.start(t0); o.stop(t1);
+    }
+    return;
+  }
+  if (timbre.tipo === 'fm') {
+    const razao = timbre.razao || 2;
+    const indice = timbre.indice || 3;
+    const carrier = ctx.createOscillator();
+    carrier.type = 'sine';
+    carrier.frequency.setValueAtTime(f, t0);
+    const mod = ctx.createOscillator();
+    mod.type = 'sine';
+    mod.frequency.setValueAtTime(f * razao, t0);
+    const modGain = ctx.createGain();
+    modGain.gain.value = f * indice;
+    mod.connect(modGain); modGain.connect(carrier.frequency);
+    carrier.connect(dest);
+    mod.start(t0); carrier.start(t0);
+    mod.stop(t1); carrier.stop(t1);
+    return;
+  }
+  const o = ctx.createOscillator();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(f, t0);
+  o.connect(dest);
+  o.start(t0); o.stop(t1);
+}
+
+function sintetizarGliss(ctx, dest, ev, t0, t1) {
+  const f = ev.f;
+  const o = ctx.createOscillator();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(f, t0);
+  o.frequency.linearRampToValueAtTime(f * (0.5 + 0.5 * Math.abs(Math.sin(f))), t1);
+  o.connect(dest);
+  o.start(t0); o.stop(t1);
+}
+
+// ------------------------------------------------------------
+// Síntese: ruído filtrado para ataques (nota+ruido)
+// ------------------------------------------------------------
+function sintetizarRuidoAtaque(ctx, dest, ev, t0, t1, timbre) {
   const dur = Math.max(0.02, t1 - t0);
-  const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
-  const buf = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-  const dados = buf.getChannelData(0);
+  const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
+  const d = buf.getChannelData(0);
   const r = prng(Math.floor(ev.f * 1000) ^ 0x9e3779b9);
-  for (let i = 0; i < bufferSize; i++) dados[i] = r() * 2 - 1;
+  for (let i = 0; i < d.length; i++) d[i] = r() * 2 - 1;
   const src = ctx.createBufferSource();
   src.buffer = buf;
   const bp = ctx.createBiquadFilter();
   bp.type = 'bandpass';
   bp.frequency.setValueAtTime(ev.f, t0);
   bp.frequency.linearRampToValueAtTime(ev.f * 1.05, t1);
-  bp.Q.value = (ev.timbre && ev.timbre.q) || 4;
+  bp.Q.value = (timbre && timbre.q) || 4;
   src.connect(bp); bp.connect(dest);
   src.start(t0); src.stop(t1);
+}
+
+// ------------------------------------------------------------
+// Síntese: granular para ataques (nota+granular)
+// ------------------------------------------------------------
+function sintetizarGranularAtaque(ctx, dest, ev, t0, t1, timbre) {
+  const durTotal = Math.max(0.02, t1 - t0);
+  const durGraoBase = (timbre.duracaoGraoMs ?? 30) / 1000;
+  const aleat = (timbre.aleatoriedadeGrao ?? 0) / 100;
+  const sobrep = (timbre.sobreposicao ?? 10) / 100;
+  const suav = timbre.suavizacaoEnv ?? 50;
+  const r = prng(Math.floor((ev.f * 1000) ^ 0x9e3779b9));
+
+  // Taxa de grãos: no ataque, distribuímos grãos ao longo de durTotal.
+  const passoGrao = Math.max(0.002, durGraoBase * (1 - sobrep));
+  const nGraos = Math.max(1, Math.ceil(durTotal / passoGrao));
+
+  for (let i = 0; i < nGraos; i++) {
+    const tG = t0 + i * passoGrao;
+    if (tG >= t1) break;
+    const fatorDur = 1 + aleat * (r() * 2 - 1);
+    const durGrao = Math.max(0.002, durGraoBase * fatorDur);
+    const g = envelopeGrao(ctx, dest, tG, Math.min(durGrao, t1 - tG), suav);
+    // cada grão é uma senoide curta na altura f (evento).
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(ev.f, tG);
+    o.connect(g);
+    o.start(tG); o.stop(tG + durGrao);
+  }
+}
+
+// ------------------------------------------------------------
+// Síntese: som contínuo
+// ------------------------------------------------------------
+//
+// Um único evento cobre [tMin, tMax]. A cada instante, a faixa
+// [fMin(t), fMax(t)] é lida do polígono; as frequências são
+// automatizadas por rampas curtas.
+function sintetizarContinuo(ctx, dest, ev, t0, t1, timbre) {
+  const durTotal = t1 - t0;
+  const verts = ev._vertices;
+  const PASSO = 0.05; // 50 ms entre rampas de frequência
+
+  // Helper: agenda rampas de uma AudioParam com um gerador de
+  // valores f(t) ao longo de [t0, t1].
+  const agendarRampa = (param, gerador, tAbs0, tAbs1) => {
+    let primeiro = true;
+    for (let t = tAbs0; t <= tAbs1 + 1e-9; t += PASSO) {
+      const v = gerador(t);
+      if (!(v > 0)) continue;
+      if (primeiro) { param.setValueAtTime(v, t); primeiro = false; }
+      else param.linearRampToValueAtTime(v, t);
+    }
+    // fecha até tAbs1 exato
+    const vf = gerador(tAbs1);
+    if (vf > 0) param.linearRampToValueAtTime(vf, tAbs1);
+  };
+
+  const fMinEm = (t) => {
+    const faixa = faixaPrincipalEm(verts, t);
+    return faixa ? faixa[0] : null;
+  };
+  const fMaxEm = (t) => {
+    const faixa = faixaPrincipalEm(verts, t);
+    return faixa ? faixa[1] : null;
+  };
+
+  // ---------- sine / aditiva: cluster de senoides ----------
+  if (timbre.tipo === 'sine' || timbre.tipo === 'aditiva') {
+    const N_POR_OITAVA = SENOIDES_POR_OITAVA;
+    // Determina o número de osciladores na faixa MAIS LARGA
+    // durante o evento (para montar uma vez e rampear depois).
+    let fMinGlobal = Infinity, fMaxGlobal = 0;
+    for (let t = t0; t <= t1 + 1e-9; t += PASSO) {
+      const fa = faixaPrincipalEm(verts, t);
+      if (!fa) continue;
+      if (fa[0] < fMinGlobal) fMinGlobal = fa[0];
+      if (fa[1] > fMaxGlobal) fMaxGlobal = fa[1];
+    }
+    if (!(fMaxGlobal > 0) || !(fMinGlobal > 0) || fMaxGlobal <= fMinGlobal) {
+      // faixa degenerada: emite uma senoide simples no centro.
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.value = 220;
+      o.connect(dest);
+      o.start(t0); o.stop(t1);
+      return;
+    }
+    const oitavas = Math.log2(fMaxGlobal / fMinGlobal);
+    const N = Math.max(2, Math.round(oitavas * N_POR_OITAVA) + 1);
+    const amp = 1 / Math.sqrt(N);
+
+    for (let i = 0; i < N; i++) {
+      const u = i / (N - 1);
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      const g = ctx.createGain();
+      g.gain.value = amp;
+      o.connect(g); g.connect(dest);
+      // Rampa de frequência: f_i(t) = fMin(t) * (fMax(t)/fMin(t))^u
+      agendarRampa(o.frequency, (t) => {
+        const fMin = fMinEm(t); const fMax = fMaxEm(t);
+        if (!fMin || !fMax || fMax <= fMin) return 0;
+        return fMin * Math.pow(fMax / fMin, u);
+      }, t0, t1);
+      o.start(t0); o.stop(t1);
+    }
+    return;
+  }
+
+  // ---------- fm / granular / ruido: banda larga + filtros ----------
+  // Fonte:
+  let fonte;
+  if (timbre.tipo === 'ruido') {
+    const dur = Math.max(0.05, durTotal);
+    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
+    const dd = buf.getChannelData(0);
+    const r = prng(0xC0FFEE);
+    for (let i = 0; i < dd.length; i++) dd[i] = r() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    fonte = src;
+  } else if (timbre.tipo === 'fm') {
+    const razao = timbre.razao || 2;
+    const indice = timbre.indice || 3;
+    const carrier = ctx.createOscillator();
+    carrier.type = 'sine';
+    carrier.frequency.value = fMinEm(t0) || 220;
+    const mod = ctx.createOscillator();
+    mod.type = 'sine';
+    mod.frequency.value = (fMinEm(t0) || 220) * razao;
+    const modGain = ctx.createGain();
+    modGain.gain.value = (fMinEm(t0) || 220) * indice;
+    mod.connect(modGain); modGain.connect(carrier.frequency);
+    mod.start(t0); mod.stop(t1);
+    fonte = carrier;
+  } else { // granular contínuo: nuvem que alimenta o filtro.
+    const dur = Math.max(0.05, durTotal);
+    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
+    const dd = buf.getChannelData(0);
+    const r = prng(0xBEEF);
+    for (let i = 0; i < dd.length; i++) dd[i] = (r() * 2 - 1) * 0.7;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    fonte = src;
+  }
+
+  // Filtros em cascata (passa-alta + passa-baixa) com cortes
+  // automatizados para acompanhar fMin(t) e fMax(t).
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.Q.value = 0.7;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.Q.value = 0.7;
+
+  agendarRampa(hp.frequency, (t) => fMinEm(t) || 20, t0, t1);
+  agendarRampa(lp.frequency, (t) => fMaxEm(t) || 20000, t0, t1);
+
+  fonte.connect(hp); hp.connect(lp); lp.connect(dest);
+  fonte.start(t0); fonte.stop(t1);
 }
 
 // ------------------------------------------------------------
@@ -513,8 +719,7 @@ export function calcularEventos(projeto, somenteCamadaId = null) {
       if (soloGlobal && !cam.solo) continue;
     }
     if (cam.vertices.length < 3) continue;
-    const evs = gerarEventosCamada(cam, projeto.duracaoTotal);
-    eventosPorCamada.set(cam.id, evs);
+    eventosPorCamada.set(cam.id, gerarEventosCamada(cam, projeto.duracaoTotal));
   }
 
   let atingidos = new Map();
@@ -623,24 +828,14 @@ export function construirGrafo(ctx, projeto, eventos, opcoes = {}) {
 // Motor online
 // ------------------------------------------------------------
 export const motor = {
-  ctx: null,
-  grafo: null,
-  analisador: null,
-  eventosPorCamada: new Map(),
-  atingidos: new Map(),
-  tocando: false,
-  pausado: false,
-  tInicio: 0,
-  tPausa: 0,
-  modo: null,
-  timerJanela: null,
-  timerAnimacao: null,
-  JANELA_S: 4.0,
-  INTERVALO_MS: 250,
-  _janelaAte: 0,
-  _ate: Infinity,
-  _onFim: null,
-  _onFrame: null,
+  ctx: null, grafo: null, analisador: null,
+  eventosPorCamada: new Map(), atingidos: new Map(),
+  tocando: false, pausado: false,
+  tInicio: 0, tPausa: 0, modo: null,
+  timerJanela: null, timerAnimacao: null,
+  JANELA_S: 4.0, INTERVALO_MS: 250,
+  _janelaAte: 0, _ate: Infinity,
+  _onFim: null, _onFrame: null,
 
   async garantirCtx() {
     if (!this.ctx) {
@@ -655,14 +850,10 @@ export const motor = {
   async play(de = 0, opcoes = {}) {
     await this.garantirCtx();
     this._desmontarGrafo();
-
     this.modo = opcoes.somenteCamadaId
-      ? { somenteCamadaId: opcoes.somenteCamadaId, ate: opcoes.ate ?? Infinity }
-      : null;
-
+      ? { somenteCamadaId: opcoes.somenteCamadaId, ate: opcoes.ate ?? Infinity } : null;
     this._ate = (this.modo && isFinite(this.modo.ate))
-      ? this.modo.ate
-      : estado.projeto.duracaoTotal;
+      ? this.modo.ate : estado.projeto.duracaoTotal;
 
     const { eventos, atingidos } = calcularEventos(
       estado.projeto,
@@ -678,10 +869,8 @@ export const motor = {
 
     this.tInicio = this.ctx.currentTime - de;
     this.tPausa = de;
-    this.tocando = true;
-    this.pausado = false;
+    this.tocando = true; this.pausado = false;
     this._janelaAte = de;
-
     this._agendarJanela();
     this._iniciarAnimacao();
     if (this._onFrame) this._onFrame();
@@ -692,18 +881,14 @@ export const motor = {
     const de = this.tPausa;
     if (this.modo && this.modo.somenteCamadaId) {
       await this.play(de, { somenteCamadaId: this.modo.somenteCamadaId, ate: this.modo.ate });
-    } else {
-      await this.play(de, {});
-    }
+    } else await this.play(de, {});
   },
 
   pausar() {
     if (!this.tocando) return;
-    this.pausado = true;
-    this.tocando = false;
+    this.pausado = true; this.tocando = false;
     this.tPausa = this.tempoAtual();
-    this._pararTimers();
-    this._desmontarGrafo();
+    this._pararTimers(); this._desmontarGrafo();
     window.__tempoReproducao = this.tPausa;
     atualizarTempoUI(this.tPausa);
     if (this._onFrame) this._onFrame();
@@ -711,12 +896,9 @@ export const motor = {
 
   parar() {
     const eraTocando = this.tocando;
-    this.tocando = false;
-    this.pausado = false;
-    this.tPausa = 0;
-    this.modo = null;
+    this.tocando = false; this.pausado = false;
+    this.tPausa = 0; this.modo = null;
     this._pararTimers();
-
     if (eraTocando && this.grafo && this.ctx) {
       const t = this.ctx.currentTime;
       const g = this.grafo.master.gain;
@@ -724,12 +906,9 @@ export const motor = {
         g.cancelScheduledValues(t);
         g.setValueAtTime(Math.max(0.0001, g.value), t);
         g.linearRampToValueAtTime(0.0001, t + 0.04);
-      } catch (_) {}
+      } catch(_){}
       setTimeout(() => this._desmontarGrafo(), 60);
-    } else {
-      this._desmontarGrafo();
-    }
-
+    } else this._desmontarGrafo();
     window.__tempoReproducao = null;
     atualizarTempoUI(0);
     if (this._onFrame) this._onFrame();
@@ -745,18 +924,14 @@ export const motor = {
     if (!this.tocando || !this.grafo) return;
     const tAgoraMusica = this.tempoAtual();
     const alvoAte = Math.min(tAgoraMusica + this.JANELA_S, this._ate);
-
     if (alvoAte > this._janelaAte) {
       const inicioCtx = this.tInicio;
       agendarEventos(this.ctx, estado.projeto, this.eventosPorCamada, this.grafo, {
         somenteCamadaId: this.modo ? this.modo.somenteCamadaId : null,
-        inicioCtx,
-        deTempo: this._janelaAte,
-        janelaAte: alvoAte,
+        inicioCtx, deTempo: this._janelaAte, janelaAte: alvoAte,
       });
       this._janelaAte = alvoAte;
     }
-
     if (tAgoraMusica >= this._ate) {
       const cb = this._onFim;
       this.parar();
@@ -775,12 +950,12 @@ export const motor = {
 
   _desmontarGrafo() {
     if (!this.grafo) return;
-    try { this.grafo.master.disconnect(); } catch (_) {}
+    try { this.grafo.master.disconnect(); } catch(_){}
     for (const c of this.grafo.camadas.values()) {
-      try { c.dinamica.disconnect(); } catch (_) {}
-      try { c.gain.disconnect(); } catch (_) {}
-      try { c.panner.disconnect(); } catch (_) {}
-      try { c.send.disconnect(); } catch (_) {}
+      try { c.dinamica.disconnect(); } catch(_){}
+      try { c.gain.disconnect(); } catch(_){}
+      try { c.panner.disconnect(); } catch(_){}
+      try { c.send.disconnect(); } catch(_){}
     }
     this.grafo = null;
   },
@@ -803,7 +978,6 @@ function atualizarTempoUI(t) {
   const el = document.getElementById('tempoAtual');
   if (el) el.textContent = t.toFixed(2) + ' s';
 }
-
 function atualizarMedidor(analisador) {
   const fill = document.getElementById('medidorFill');
   if (!fill || !analisador) return;
@@ -827,11 +1001,7 @@ export async function tocarSomenteSelecionada() {
   if (typeof window.__rolarParaTempo === 'function') window.__rolarParaTempo(t0);
   return true;
 }
-
-export function valoresAtingidos() {
-  return motor.atingidos || new Map();
-}
-
+export function valoresAtingidos() { return motor.atingidos || new Map(); }
 export function recalcularAtingidos() {
   const { eventos, atingidos } = calcularEventos(estado.projeto, null);
   motor.eventosPorCamada = eventos;

@@ -20,13 +20,28 @@ export function corAleatoria() {
   return hslParaHex(h, 60, 55);
 }
 
+/** Tipos de objeto válidos (natureza temporal do polígono). */
+export const TIPOS_OBJETO = ['nota', 'gliss', 'continuo'];
+
+/** Tipos de síntese/timbre válidos. */
+export const TIPOS_TIMBRE = ['sine', 'aditiva', 'fm', 'granular', 'ruido'];
+
+/** Timbre padrão por tipo de síntese. */
 export function timbrePadrao(tipo) {
   switch (tipo) {
-    case 'sine':    return { tipo: 'sine' };
-    case 'aditiva': return { tipo: 'aditiva', nHarm: 6, inclinacao: 1.5 };
-    case 'fm':      return { tipo: 'fm', razao: 2, indice: 3 };
-    case 'ruido':   return { tipo: 'ruido', q: 4 };
-    default:        return { tipo: 'sine' };
+    case 'sine':     return { tipo: 'sine' };
+    case 'aditiva':  return { tipo: 'aditiva', nHarm: 6, inclinacao: 1.5 };
+    case 'fm':       return { tipo: 'fm', razao: 2, indice: 3 };
+    case 'granular':
+      return {
+        tipo: 'granular',
+        duracaoGraoMs: 30,
+        suavizacaoEnv: 50,
+        aleatoriedadeGrao: 0,
+        sobreposicao: 10,
+      };
+    case 'ruido':    return { tipo: 'ruido', q: 4 };
+    default:         return { tipo: 'sine' };
   }
 }
 
@@ -54,10 +69,6 @@ export function normalizarEnvelope(env) {
   return e;
 }
 
-/** Série de alturas padrão.
- *  `ativa` é mantido por compatibilidade com projetos antigos, mas
- *  NÃO controla mais nada. Quem decide usar a série é
- *  `quantizacaoAltura.modo === 'serie'`. */
 export function serieAlturasPadrao() {
   return { ativa: false, texto: '', modo: 'absoluta', oitava: 'proxima' };
 }
@@ -69,6 +80,7 @@ export function criarCamada(vertices = []) {
     vertices,
     cor: corAleatoria(),
     padraoPreenchimento: 'hachura',
+    // tipoObjeto: 'nota' | 'gliss' | 'continuo'
     tipoObjeto: 'nota',
     timbre: timbrePadrao('sine'),
     envelope: envelopePadrao(),
@@ -76,10 +88,14 @@ export function criarCamada(vertices = []) {
     andamento: 120,
     pulso: 0.5,
     densidadeRitmica: 1,
+    // Duração dos eventos, em múltiplos do passo rítmico.
+    // multiplicadorDuracao: 0.1..10.0
+    // aleatoriedadeDuracao: 0..100 (%)
+    multiplicadorDuracao: 1.0,
+    aleatoriedadeDuracao: 0,
     padraoRitmico: [1, 0, 1, 1],
     semente: Math.floor(Math.random() * 100000),
-    // 'livre' | 'semitons' | 'conjunto' | 'serie'
-    quantizacaoAltura: { modo: 'livre' },
+    quantizacaoAltura: { modo: 'livre' },  // 'livre' | 'semitons' | 'conjunto' | 'serie'
     serieAlturas: serieAlturasPadrao(),
     automacoes: { dinamica: [], panorama: [], reverb: [] },
     mudo: false,
@@ -140,7 +156,7 @@ export function criarRelacao(camadaReferencia, camadasDependentes) {
 
 export function criarProjeto() {
   return {
-    versao: 4,
+    versao: 5,
     volumeMaster: 0.8,
     duracaoTotal: 30,
     reverbTempo: 2.0,
@@ -218,28 +234,53 @@ function migrarCamada(c) {
   const base = criarCamada(Array.isArray(c.vertices) ? c.vertices : []);
   if (c.id) base.id = c.id;
   if (c.nome) base.nome = c.nome;
-  for (const k of ['cor','padraoPreenchimento','tipoObjeto','volume','andamento',
+  for (const k of ['cor','padraoPreenchimento','volume','andamento',
                    'pulso','densidadeRitmica','padraoRitmico','semente',
-                   'mudo','solo','origemSlots']) {
+                   'mudo','solo','origemSlots',
+                   'multiplicadorDuracao','aleatoriedadeDuracao']) {
     if (c[k] !== undefined) base[k] = c[k];
   }
-  if (c.timbre && typeof c.timbre === 'object') base.timbre = { ...base.timbre, ...c.timbre };
+
+  // tipoObjeto: migra legado 'granular'/'ruido' (que eram tipos de
+  // objeto) para tipo de objeto + tipo de síntese.
+  const tipoAntigo = c.tipoObjeto;
+  if (tipoAntigo === 'granular') {
+    base.tipoObjeto = 'nota';
+    base.timbre = { ...timbrePadrao('granular'),
+                    ...(c.timbre && typeof c.timbre === 'object' ? c.timbre : {}) };
+    base.timbre.tipo = 'granular';
+  } else if (tipoAntigo === 'ruido') {
+    base.tipoObjeto = 'nota';
+    base.timbre = { ...timbrePadrao('ruido'),
+                    ...(c.timbre && typeof c.timbre === 'object' ? c.timbre : {}) };
+    base.timbre.tipo = 'ruido';
+  } else if (tipoAntigo === 'nota' || tipoAntigo === 'gliss' || tipoAntigo === 'continuo') {
+    base.tipoObjeto = tipoAntigo;
+  } else {
+    base.tipoObjeto = 'nota';
+  }
+
+  // timbre: mescla e valida.
+  if (c.timbre && typeof c.timbre === 'object') {
+    const t = c.timbre.tipo || 'sine';
+    if (TIPOS_TIMBRE.includes(t)) {
+      base.timbre = { ...timbrePadrao(t), ...c.timbre };
+    } else {
+      base.timbre = { ...base.timbre, ...c.timbre };
+    }
+  }
+
   if (c.envelope && typeof c.envelope === 'object') {
     base.envelope = normalizarEnvelope({ ...base.envelope, ...c.envelope });
   }
-  // quantizacaoAltura: aceita string antiga ou objeto novo. Também
-  // converte `serieAlturas.ativa === true` em `modo:'serie'`.
   if (typeof c.quantizacaoAltura === 'string') {
     base.quantizacaoAltura = { modo: c.quantizacaoAltura };
   } else if (c.quantizacaoAltura && typeof c.quantizacaoAltura === 'object') {
     base.quantizacaoAltura = { ...base.quantizacaoAltura, ...c.quantizacaoAltura };
   }
-  // Mescla série (mantém por compatibilidade).
   if (c.serieAlturas && typeof c.serieAlturas === 'object') {
     base.serieAlturas = { ...serieAlturasPadrao(), ...c.serieAlturas };
   }
-  // Compatibilidade retroativa: projeto antigo tinha `serieAlturas.ativa`
-  // controlando a série, e a quantização `livre`. Convertemos para modo.
   if (base.serieAlturas && base.serieAlturas.ativa === true &&
       base.quantizacaoAltura.modo !== 'serie') {
     base.quantizacaoAltura = { modo: 'serie' };
