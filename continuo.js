@@ -28,6 +28,11 @@
 // Aditiva e FM acompanham a trajetória mesmo fora do polígono: só são
 // retirados os inaudíveis ou acima de Nyquist.
 //
+// Granular com arquivo de áudio: um cursor percorre o arquivo em vaivém,
+// em função do tempo musical. Cada grão é sempre lido para a frente e
+// transposto para que a frequência dominante do trecho caia na altura-
+// alvo. No som contínuo, o resultado ainda passa pela máscara do polígono.
+//
 // Módulo puro: sem DOM e sem Web Audio. Roda dentro do Worker.
 // ============================================================
 
@@ -44,6 +49,10 @@ const DENSIDADE_GRAOS_PADRAO = 100;
 const CTRL_AMOSTRAS = 64;        // taxa de controle das trajetórias
 const SALTO_OITAVAS = 0.25;      // variação num quadro tratada como salto
 const LARGURA_BANDA_PADRAO_ST = 1;
+const ANALISE_N = 4096;          // análise da frequência dominante
+const ANALISE_HOP = 1024;
+const ANALISE_F_MIN = 40;
+const TRANSPOSICAO_MAX = 4;      // ±2 oitavas
 
 // ------------------------------------------------------------
 // PRNG (a mesma família usada em audio.js)
@@ -295,7 +304,104 @@ function somarGrao(saida, i0, L, w0, w1, fase, suav, sr) {
   }
 }
 
-function renderGranular(desc, sr, n, poly, lMin, lMax) {
+// ------------------------------------------------------------
+// Fonte: arquivo de áudio
+// ------------------------------------------------------------
+/** Frequência dominante por quadro (0 = quadro silencioso). */
+export function analisarFonte(dados, sr) {
+  const N = ANALISE_N, H = ANALISE_HOP;
+  const quadros = Math.floor(Math.max(0, dados.length - N) / H) + 1;
+  const dominante = new Float32Array(quadros);
+  const janela = new Float64Array(N);
+  for (let i = 0; i < N; i++) janela[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+  let picoGlobal = 0;
+  for (let i = 0; i < dados.length; i++) picoGlobal = Math.max(picoGlobal, Math.abs(dados[i]));
+  const limiar = picoGlobal * 0.003;  // -50 dB
+  const df = sr / N;
+  const kMin = Math.max(2, Math.ceil(ANALISE_F_MIN / df));
+  const re = new Float64Array(N), im = new Float64Array(N);
+  const mag = new Float64Array(N / 2);
+  for (let q = 0; q < quadros; q++) {
+    const ini = q * H;
+    let pico = 0;
+    for (let i = 0; i < N; i++) {
+      const v = ini + i < dados.length ? dados[ini + i] : 0;
+      pico = Math.max(pico, Math.abs(v));
+      re[i] = v * janela[i];
+      im[i] = 0;
+    }
+    if (pico < limiar) continue;
+    fft(re, im);
+    let kPico = kMin;
+    for (let k = kMin; k < N / 2 - 1; k++) {
+      mag[k] = re[k] * re[k] + im[k] * im[k];
+      if (mag[k] > mag[kPico]) kPico = k;
+    }
+    mag[N / 2 - 1] = 0;
+    const y0 = Math.log(mag[kPico - 1] + 1e-30), y1 = Math.log(mag[kPico] + 1e-30);
+    const y2 = Math.log(mag[kPico + 1] + 1e-30);
+    const curv = y0 - 2 * y1 + y2;
+    const ajuste = curv < 0 && kPico > kMin ? 0.5 * (y0 - y2) / curv : 0;
+    dominante[q] = (kPico + ajuste) * df;
+  }
+  return dominante;
+}
+
+function dominanteEm(fonte, amostra) {
+  const a = fonte.analise;
+  const q = Math.min(a.length - 1, Math.max(0, Math.floor(amostra / ANALISE_HOP)));
+  return a[q];
+}
+
+/** Razão de leitura que leva a dominante do trecho à altura-alvo. */
+function transposicao(alvo, dominante) {
+  if (!(dominante > 0)) return 1;
+  return Math.max(1 / TRANSPOSICAO_MAX, Math.min(TRANSPOSICAO_MAX, alvo / dominante));
+}
+
+/** Cursor em vaivém, com desvio em uma janela ao redor da posição.
+ *  Com 100%, a janela cobre todo o arquivo (posição uniforme). */
+function criarCursor(timbre, fonte, semente) {
+  const r = prng((semente ^ 0x9D2C5680) >>> 0);
+  const D = fonte.dados.length / fonte.sr;
+  const vel = Math.max(0.01, (timbre.velocidadePercurso ?? 100) / 100);
+  const desvio = Math.min(1, Math.max(0, (timbre.aleatoriedadePosicao ?? 0) / 100));
+  return (t) => {
+    const x = (t * vel) % (2 * D);
+    let p = x <= D ? x : 2 * D - x;
+    const sorteio = r();
+    if (desvio > 0) {
+      p += (sorteio - 0.5) * desvio * D;
+      p = ((p % D) + D) % D;
+    }
+    return Math.min(fonte.dados.length - 1, p * fonte.sr);
+  };
+}
+
+/** Grão lido do arquivo; a razão de leitura vai de taxa0 a taxa1. */
+function somarGraoFonte(saida, i0, L, taxa0, taxa1, inicio, fonte, suav, sr) {
+  const dados = fonte.dados, tam = dados.length;
+  const consumo = L * (taxa0 + taxa1) / 2;
+  let pos = inicio + consumo < tam - 1 ? inicio : Math.max(0, tam - 1 - consumo);
+  const R = Math.max(Math.round(0.0005 * sr), Math.round(0.5 * suav * L));
+  const Rlim = Math.min(R, L >> 1);
+  const dTaxa = (taxa1 - taxa0) / L;
+  let taxa = taxa0;
+  const fim = Math.min(L, saida.length - i0);
+  for (let k = 0; k < fim; k++) {
+    const borda = Math.min(k, L - 1 - k);
+    const g = borda < Rlim ? (borda + 0.5) / Rlim : 1;
+    const idx = Math.floor(pos);
+    const fr = pos - idx;
+    const a = dados[idx % tam], b = dados[(idx + 1) % tam];
+    saida[i0 + k] += g * (a + (b - a) * fr);
+    pos += taxa;
+    taxa += dTaxa;
+    if (pos >= tam) pos -= tam;
+  }
+}
+
+function renderGranular(desc, sr, n, poly, lMin, lMax, fonte) {
   const { t0, t1, timbre, quant } = desc;
   const saida = new Float64Array(n);
   const r = prng((desc.semente ^ 0x7C15AD3B) >>> 0);
@@ -316,6 +422,7 @@ function renderGranular(desc, sr, n, poly, lMin, lMax) {
   const area = (t1 - t0) * (lMax - lMin);
   const nTentativas = Math.min(MAX_GRAOS, Math.ceil(dens * area));
   const lTeto = Math.log2(sr * 0.49);
+  const cursor = fonte ? criarCursor(timbre, fonte, desc.semente) : null;
   let itens = 0;
   for (let i = 0; i < nTentativas; i++) {
     const tC = t0 + r() * (t1 - t0);
@@ -333,8 +440,14 @@ function renderGranular(desc, sr, n, poly, lMin, lMax) {
     const L = Math.round((fim - ini) * sr);
     if (L < 8) continue;
     const i0 = Math.round((ini - t0) * sr);
-    const w = 2 * Math.PI * Math.pow(2, l) / sr;
-    somarGrao(saida, i0, L, w, w, sorteioFase * 2 * Math.PI, suav, sr);
+    if (fonte) {
+      const inicio = cursor(ini);
+      const taxa = transposicao(Math.pow(2, l), dominanteEm(fonte, inicio));
+      somarGraoFonte(saida, i0, L, taxa, taxa, inicio, fonte, suav, sr);
+    } else {
+      const w = 2 * Math.PI * Math.pow(2, l) / sr;
+      somarGrao(saida, i0, L, w, w, sorteioFase * 2 * Math.PI, suav, sr);
+    }
     itens++;
   }
   return { saida, omitidos: 0, itens };
@@ -377,14 +490,19 @@ export function fft(re, im, inversa = false) {
 }
 
 function renderRuido(desc, sr, n, faixasEm) {
+  const r = prng((desc.semente ^ 0xC0FFEE) >>> 0);
+  // Ruído branco com margem de um quadro em cada lado.
+  const ruido = new Float32Array(n + 2 * STFT_N);
+  for (let i = 0; i < ruido.length; i++) ruido[i] = r() * 2 - 1;
+  return { saida: filtrarPorMascara(ruido, desc, sr, n, faixasEm), omitidos: 0, itens: 0 };
+}
+
+/** Deixa passar só as faixas de faixasEm(t). `entrada` tem margem de
+ *  STFT_N amostras antes e depois das n amostras úteis. */
+function filtrarPorMascara(entrada, desc, sr, n, faixasEm) {
   const { t0, t1 } = desc;
   const N = STFT_N, H = STFT_HOP;
   const saida = new Float64Array(n);
-  const r = prng((desc.semente ^ 0xC0FFEE) >>> 0);
-
-  // Ruído branco com margem de um quadro em cada lado.
-  const ruido = new Float32Array(n + 2 * N);
-  for (let i = 0; i < ruido.length; i++) ruido[i] = r() * 2 - 1;
 
   const janela = new Float64Array(N);
   for (let i = 0; i < N; i++) janela[i] = Math.sin(Math.PI * (i + 0.5) / N);
@@ -414,7 +532,7 @@ function renderRuido(desc, sr, n, faixasEm) {
     }
 
     for (let i = 0; i < N; i++) {
-      re[i] = ruido[s + N + i] * janela[i];
+      re[i] = entrada[s + N + i] * janela[i];
       im[i] = 0;
     }
     fft(re, im);
@@ -434,7 +552,7 @@ function renderRuido(desc, sr, n, faixasEm) {
       if (idx >= 0 && idx < n) saida[idx] += re[i] / N * janela[i] * ganhoOLA;
     }
   }
-  return { saida, omitidos: 0, itens: 0 };
+  return saida;
 }
 
 // ------------------------------------------------------------
@@ -546,7 +664,7 @@ function renderGlissParciais(desc, sr, n, poly) {
   return { saida, omitidos, itens: itens.length };
 }
 
-function renderGlissGranular(desc, sr, n, poly) {
+function renderGlissGranular(desc, sr, n, poly, fonte) {
   const { t0, t1, timbre } = desc;
   const saida = new Float64Array(n);
   const { linhas, ganhos, N } = calcularTrajetorias(desc, sr, n, poly);
@@ -557,6 +675,7 @@ function renderGlissGranular(desc, sr, n, poly) {
   const dens = Math.max(0.1, timbre.densidadeGraos ?? DENSIDADE_GRAOS_PADRAO);
   const porLinha = Math.min(MAX_GRAOS / N, Math.ceil(dens * (t1 - t0)));
   const incremento = (l) => 2 * Math.PI * Math.pow(2, l) / sr;
+  const cursor = fonte ? criarCursor(timbre, fonte, desc.semente) : null;
   let itens = 0;
   for (let i = 0; i < N; i++) {
     const L = linhas[i], G = ganhos[i];
@@ -571,9 +690,41 @@ function renderGlissGranular(desc, sr, n, poly) {
       const kA = Math.floor(ini / CTRL_AMOSTRAS), kB = Math.floor((fim - 1) / CTRL_AMOSTRAS);
       if (G[kA] < 0.5 || G[kB] < 0.5) continue;
       if (Math.pow(2, Math.max(L[kA], L[kB])) > sr * 0.49) continue;
-      somarGrao(saida, ini, tam, incremento(L[kA]), incremento(L[kB]), fase, suav, sr);
+      if (fonte) {
+        const inicio = cursor(t0 + ini / sr);
+        const dom = dominanteEm(fonte, inicio);
+        const taxa0 = transposicao(Math.pow(2, L[kA]), dom);
+        const taxa1 = transposicao(Math.pow(2, L[kB]), dom);
+        somarGraoFonte(saida, ini, tam, taxa0, taxa1, inicio, fonte, suav, sr);
+      } else {
+        somarGrao(saida, ini, tam, incremento(L[kA]), incremento(L[kB]), fase, suav, sr);
+      }
       itens++;
     }
+  }
+  return { saida, omitidos: 0, itens };
+}
+
+/** Nota com arquivo de áudio: fluxo regular de grãos na altura do evento. */
+function renderNotaGranular(desc, sr, n, fonte) {
+  const { t0, t1, f, timbre } = desc;
+  const saida = new Float64Array(n);
+  const r = prng((desc.semente ^ 0x6C8E9CF5) >>> 0);
+  const durBase = (timbre.duracaoGraoMs ?? 30) / 1000;
+  const aleat = (timbre.aleatoriedadeGrao ?? 0) / 100;
+  const sobrep = (timbre.sobreposicao ?? 10) / 100;
+  const suav = Math.min(100, Math.max(0, timbre.suavizacaoEnv ?? 50)) / 100;
+  const passo = Math.max(0.002, durBase * (1 - sobrep));
+  const cursor = criarCursor(timbre, fonte, desc.semente);
+  let itens = 0;
+  for (let tG = t0; tG < t1; tG += passo) {
+    const d = Math.max(0.002, durBase * (1 + aleat * (r() * 2 - 1)));
+    const L = Math.round(Math.min(d, t1 - tG) * sr);
+    if (L < 8) continue;
+    const inicio = cursor(tG);
+    const taxa = transposicao(f, dominanteEm(fonte, inicio));
+    somarGraoFonte(saida, Math.round((tG - t0) * sr), L, taxa, taxa, inicio, fonte, suav, sr);
+    itens++;
   }
   return { saida, omitidos: 0, itens };
 }
@@ -598,23 +749,32 @@ function faixasDoGliss(desc, poly) {
 // ------------------------------------------------------------
 // Entrada
 // ------------------------------------------------------------
-/** desc: { vertices, timbre, quant, semente, t0, t1 }.
+/** desc: { modo, vertices, timbre, quant, semente, t0, t1, nGliss, f }.
+ *  fonte: { dados, sr, analise } quando o grão vem de um arquivo.
  *  Devolve { dados: Float32Array, omitidos, itens, pico }. */
-export function renderizarContinuo(desc, sr) {
+export function renderizarContinuo(desc, sr, fonte = null) {
   const n = Math.max(1, Math.round((desc.t1 - desc.t0) * sr));
-  const poly = poligonoLog(desc.vertices);
+  const poly = poligonoLog(desc.vertices || []);
   const ls = poly.map(p => p.l);
   const lMin = Math.min(...ls), lMax = Math.max(...ls);
 
   let res;
-  if (desc.modo === 'gliss') {
+  if (desc.modo === 'nota') {
+    res = renderNotaGranular(desc, sr, n, fonte);
+  } else if (desc.modo === 'gliss') {
     if (desc.timbre.tipo === 'ruido') res = renderRuido(desc, sr, n, faixasDoGliss(desc, poly));
-    else if (desc.timbre.tipo === 'granular') res = renderGlissGranular(desc, sr, n, poly);
+    else if (desc.timbre.tipo === 'granular') res = renderGlissGranular(desc, sr, n, poly, fonte);
     else res = renderGlissParciais(desc, sr, n, poly);
   } else if (desc.timbre.tipo === 'ruido') {
     res = renderRuido(desc, sr, n, (t) => intervalosEmTempo(poly, t));
-  } else if (desc.timbre.tipo === 'granular') res = renderGranular(desc, sr, n, poly, lMin, lMax);
-  else res = renderCluster(desc, sr, n, poly, lMin, lMax);
+  } else if (desc.timbre.tipo === 'granular') {
+    res = renderGranular(desc, sr, n, poly, lMin, lMax, fonte);
+    if (fonte) {  // só o que estiver dentro do polígono permanece
+      const entrada = new Float32Array(n + 2 * STFT_N);
+      entrada.set(res.saida, STFT_N);
+      res.saida = filtrarPorMascara(entrada, desc, sr, n, (t) => intervalosEmTempo(poly, t));
+    }
+  } else res = renderCluster(desc, sr, n, poly, lMin, lMax);
 
   const { saida } = res;
 

@@ -41,6 +41,13 @@ export function timbrePadrao(tipo) {
         sobreposicao: 10,
         // Som contínuo: grãos/s por oitava. Glissando: grãos/s por trajetória.
         densidadeGraos: 100,
+        // Material do grão: 'senoide' | 'arquivo' (nome em audios/).
+        material: 'senoide',
+        arquivo: '',
+        // Percurso do cursor: 100% = velocidade original do arquivo.
+        velocidadePercurso: 100,
+        // Desvio da posição: 0% = linear; 100% = qualquer ponto do arquivo.
+        aleatoriedadePosicao: 0,
       };
     case 'ruido':    return { tipo: 'ruido', q: 4, larguraBandaSt: 1 };
     default:         return { tipo: 'sine' };

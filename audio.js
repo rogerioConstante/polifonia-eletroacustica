@@ -26,6 +26,7 @@
 import { estado, camadaSelecionada, valorAutomacao } from './model.js';
 import { aplicarRelacoes } from './relations.js';
 import { parseSerie } from './serie.js';
+import { versaoArquivo, decodificarArquivo } from './arquivos.js';
 
 export const CAUDA_CAMADA_S = 0;
 
@@ -381,6 +382,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       timbre: cam.timbre || { tipo: 'sine' },
       vol: cam.volume != null ? cam.volume : 0.8,
       env: envEv,
+      semente: (cam.semente ^ Math.imul(idxAtaque, 0x9E3779B1)) >>> 0,
     });
   }
 
@@ -393,6 +395,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
 // ------------------------------------------------------------
 export function sintetizarEvento(ctx, dest, ev) {
   if (ev._cont) return;  // ver agendarContinuos()
+  if (usaArquivo(ev.timbre) && !ev._render) return;  // arquivo indisponível
   const t0 = ev.t;
   const dur = Math.max(0.005, ev.dur);
   const t1 = t0 + dur;
@@ -403,6 +406,16 @@ export function sintetizarEvento(ctx, dest, ev) {
   const timbre = ev.timbre || { tipo: 'sine' };
 
   // ---------- Ataques (nota) ----------
+  if (usaArquivo(timbre)) {
+    const dados = ev._render.dados;
+    const buf = ctx.createBuffer(1, dados.length, ctx.sampleRate);
+    buf.copyToChannel(dados, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(envNode);
+    src.start(t0);
+    return;
+  }
   if (timbre.tipo === 'granular') {
     sintetizarGranularAtaque(ctx, envNode, ev, t0, t1, timbre);
     return;
@@ -518,6 +531,7 @@ const CACHE_CONTINUO_MAX_AMOSTRAS = 120e6;  // ≈ 480 MB
 const cacheContinuo = new Map();            // chave → Promise<resultado>
 let workerContinuo = null;
 let proximoJob = 1;
+const fontesNoWorker = new Map();           // nome|sr → versão do arquivo
 const jobsContinuo = new Map();
 
 function obterWorker() {
@@ -535,6 +549,7 @@ function obterWorker() {
     for (const job of jobsContinuo.values()) job.rejeitar(new Error(e.message));
     jobsContinuo.clear();
     workerContinuo = null;
+    fontesNoWorker.clear();
   };
   return workerContinuo;
 }
@@ -568,22 +583,61 @@ async function limitarCacheContinuo() {
   }
 }
 
-/** Calcula os sons contínuos pendentes. Guarda o resultado em ev._render
- *  e devolve o número de parciais omitidos pelo limite de custo. */
+function usaArquivo(timbre) {
+  return !!timbre && timbre.tipo === 'granular' && timbre.material === 'arquivo';
+}
+
+/** Garante que o arquivo esteja no Worker e devolve sua referência. */
+async function garantirFonte(nome, sampleRate) {
+  const versao = await versaoArquivo(nome);
+  const chave = `${nome}|${sampleRate}`;
+  if (fontesNoWorker.get(chave) !== versao) {
+    const dados = await decodificarArquivo(nome, sampleRate);
+    obterWorker().postMessage({ tipo: 'arquivo', chave, dados, sr: sampleRate }, [dados.buffer]);
+    fontesNoWorker.set(chave, versao);
+  }
+  return { chave, versao };
+}
+
+/** Calcula os sons pré-renderizados, inclusive notas com grãos de arquivo.
+ *  Guarda o resultado em ev._render. Devolve { omitidos, avisos }. */
 export async function prepararContinuos(eventos, sampleRate, aoProgredir = null) {
   const lista = [];
   for (const evs of eventos.values())
-    for (const ev of evs) if (ev._cont) lista.push(ev);
+    for (const ev of evs) if (ev._cont || usaArquivo(ev.timbre)) lista.push(ev);
+  const fontes = new Map();
+  const avisos = new Set();
+  const fonteDe = (nome) => {
+    if (!fontes.has(nome)) {
+      fontes.set(nome, garantirFonte(nome, sampleRate).catch((e) => {
+        avisos.add(e.message);
+        return null;
+      }));
+    }
+    return fontes.get(nome);
+  };
   let prontos = 0, omitidos = 0;
   if (aoProgredir && lista.length) aoProgredir(0, lista.length);
   await Promise.all(lista.map(async (ev) => {
-    const r = await calcularContinuo(ev._cont, sampleRate);
-    ev._render = r;
-    omitidos += r.omitidos || 0;
+    let fonte = null;
+    const arquivo = usaArquivo(ev.timbre);
+    if (arquivo) {
+      if (ev.timbre.arquivo) fonte = await fonteDe(ev.timbre.arquivo);
+      else avisos.add('granular sem arquivo selecionado');
+    }
+    if (!arquivo || fonte) {
+      const desc = ev._cont
+        ? { ...ev._cont, fonte }
+        : { modo: 'nota', timbre: ev.timbre, semente: ev.semente,
+            t0: ev.t, t1: ev.t + ev.dur, f: ev.f, fonte };
+      const r = await calcularContinuo(desc, sampleRate);
+      ev._render = r;
+      omitidos += r.omitidos || 0;
+    }
     prontos++;
     if (aoProgredir) aoProgredir(prontos, lista.length);
   }));
-  return omitidos;
+  return { omitidos, avisos: [...avisos] };
 }
 
 /** Agenda de uma só vez os sons contínuos ainda não terminados em deTempo. */
@@ -771,7 +825,7 @@ export const motor = {
   JANELA_S: 4.0, INTERVALO_MS: 250,
   _janelaAte: 0, _ate: Infinity,
   _onFim: null, _onFrame: null, _onStatus: null,
-  _tokenPlay: 0, omitidos: 0,
+  _tokenPlay: 0, avisos: [],
 
   async garantirCtx() {
     if (!this.ctx) {
@@ -802,11 +856,12 @@ export const motor = {
     this.eventosPorCamada = eventos;
     this.atingidos = atingidos;
 
-    const omitidos = await prepararContinuos(eventos, this.ctx.sampleRate, (n, total) => {
+    const { omitidos, avisos } = await prepararContinuos(eventos, this.ctx.sampleRate, (n, total) => {
       if (n < total && this._onStatus) this._onStatus(`calculando sons (${n}/${total})…`);
     });
     if (token !== this._tokenPlay) return false;  // stop ou novo play durante o cálculo
-    this.omitidos = omitidos;
+    this.avisos = omitidos
+      ? [...avisos, `${omitidos} parciais fracos omitidos por custo`] : avisos;
 
     this.grafo = criarGrafo(this.ctx, estado.projeto, {
       somenteCamadaId: this.modo ? this.modo.somenteCamadaId : null,
@@ -962,5 +1017,8 @@ export function recalcularAtingidos() {
   const { eventos, atingidos } = calcularEventos(estado.projeto, null);
   motor.eventosPorCamada = eventos;
   motor.atingidos = atingidos;
+  // Durante a reprodução, as notas com grãos de arquivo ainda por tocar
+  // precisam do áudio calculado para as novas alturas.
+  if (motor.tocando) prepararContinuos(eventos, motor.ctx.sampleRate).catch(() => {});
   return atingidos;
 }

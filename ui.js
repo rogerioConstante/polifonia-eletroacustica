@@ -22,6 +22,7 @@ import {
 } from './audio.js';
 import { exportarWAV } from './export.js';
 import { parseSerie, resumoSerie } from './serie.js';
+import { listarArquivos, urlArquivo } from './arquivos.js';
 
 let canvas;
 
@@ -82,7 +83,7 @@ function ligarTransporte() {
       if (motor.tocando) { motor.pausar(); btnPlay.textContent = '▶'; setStatus('pausado'); }
       else {
         const ok = motor.pausado ? await motor.retomar() : await motor.play(0, {});
-        if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando' + avisoOmitidos()); }
+        if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando' + avisoRender()); }
       }
     } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
@@ -91,7 +92,7 @@ function ligarTransporte() {
       const cam = camadaSelecionada(); if (!cam) return;
       if (motor.tocando || motor.pausado) motor.parar();
       const ok = await tocarSomenteSelecionada();
-      if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando somente ' + cam.nome + ' (relações ignoradas)' + avisoOmitidos()); }
+      if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando somente ' + cam.nome + ' (relações ignoradas)' + avisoRender()); }
     } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
   btnStop.onclick = () => {
@@ -604,6 +605,7 @@ function renderizarTimbre(cam) {
     campo('razao', 'Razão', 0.1, 10, 0.1, t.razao ?? 2);
     campo('indice', 'Índice', 0, 20, 0.1, t.indice ?? 3);
   } else if (t.tipo === 'granular') {
+    renderizarMaterial(box, cam, t, campo);
     campo('duracaoGraoMs',   'Duração do grão', 10, 100, 1,   t.duracaoGraoMs   ?? 30, 'ms');
     campo('suavizacaoEnv',   'Suavização',      0,  100, 1,   t.suavizacaoEnv   ?? 50, '%');
     campo('aleatoriedadeGrao','Aleatoriedade',  0,  100, 1,   t.aleatoriedadeGrao ?? 0, '%');
@@ -624,6 +626,89 @@ function renderizarTimbre(cam) {
       campo('q', 'Q do filtro', 0.1, 30, 0.1, t.q ?? 4);
     }
   }
+}
+
+function renderizarMaterial(box, cam, t, campo) {
+  const material = t.material === 'arquivo' ? 'arquivo' : 'senoide';
+  const rotulo = document.createElement('label');
+  rotulo.textContent = 'Material ';
+  const sel = document.createElement('select');
+  sel.id = 'cMaterial';
+  sel.innerHTML = '<option value="senoide">Senoide</option><option value="arquivo">Arquivo de áudio</option>';
+  sel.value = material;
+  sel.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  sel.addEventListener('change', () => {
+    const cam2 = camadaSelecionada(); if (!cam2) return;
+    cam2.timbre.material = sel.value;
+    renderizarTimbre(cam2);
+  });
+  rotulo.appendChild(sel);
+  box.appendChild(rotulo);
+  if (material !== 'arquivo') return;
+
+  const linha = document.createElement('label');
+  linha.textContent = 'Arquivo ';
+  const selA = document.createElement('select');
+  selA.id = 'cArquivo';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = '↻';
+  btn.title = 'Atualizar a lista da pasta audios/';
+  linha.appendChild(selA);
+  linha.appendChild(btn);
+  box.appendChild(linha);
+
+  // Audição direta do arquivo, fora da cadeia de áudio do programa.
+  const player = document.createElement('audio');
+  player.id = 'cOuvirArquivo';
+  player.controls = true;
+  player.preload = 'metadata';
+  box.appendChild(player);
+
+  const aviso = document.createElement('div');
+  aviso.className = 'dica';
+  box.appendChild(aviso);
+
+  const mostrarArquivo = (nome) => {
+    player.style.display = nome ? 'block' : 'none';
+    if (nome) player.src = urlArquivo(nome); else player.removeAttribute('src');
+  };
+
+  const preencher = async () => {
+    let nomes = [];
+    let erro = false;
+    try { nomes = await listarArquivos(); } catch (_) { erro = true; }
+    const atual = (camadaSelecionada() || cam).timbre.arquivo || '';
+    const presente = !atual || nomes.includes(atual);
+    selA.innerHTML = '';
+    const opcao = (valor, texto) => {
+      const o = document.createElement('option');
+      o.value = valor; o.textContent = texto;
+      selA.appendChild(o);
+    };
+    opcao('', '— escolher —');
+    if (!presente) opcao(atual, atual + ' (ausente)');
+    for (const nome of nomes) opcao(nome, nome);
+    selA.value = atual;
+    if (erro) aviso.textContent = 'Não foi possível ler a pasta audios/.';
+    else if (!presente) aviso.textContent = 'Arquivo ausente da pasta audios/: a camada não soará.';
+    else if (!nomes.length) aviso.textContent = 'Coloque arquivos na pasta audios/ e clique em ↻.';
+    else aviso.textContent = '';
+    mostrarArquivo(presente ? atual : '');
+  };
+
+  selA.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  selA.addEventListener('change', () => {
+    const cam2 = camadaSelecionada(); if (!cam2) return;
+    cam2.timbre.arquivo = selA.value;
+    aviso.textContent = '';
+    mostrarArquivo(selA.value);
+  });
+  btn.addEventListener('click', (e) => { e.preventDefault(); preencher(); });
+  preencher();
+
+  campo('velocidadePercurso', 'Velocidade do percurso', 1, 1000, 1, t.velocidadePercurso ?? 100, '%');
+  campo('aleatoriedadePosicao', 'Aleatoriedade da posição', 0, 100, 1, t.aleatoriedadePosicao ?? 0, '%');
 }
 
 // -------- Painel: Envelope --------
@@ -788,10 +873,13 @@ function ligarExportacao() {
       const escopo = document.getElementById('expEscopo').value;
       const cam = camadaSelecionada();
       const somenteCamadaId = (escopo === 'solo' && cam) ? cam.id : null;
-      await exportarWAV(estado.projeto, { bits, sampleRate, somenteCamadaId, nome: nome + '.wav' },
+      let aviso = '';
+      await exportarWAV(estado.projeto,
+        { bits, sampleRate, somenteCamadaId, nome: nome + '.wav', aoAvisar: (txt) => { aviso = txt; } },
         (p) => { progFill.style.width = Math.round(p * 100) + '%'; });
-      statusEl.textContent = 'Pronto: ' + nome + '.wav';
-      setTimeout(() => { dlg.style.display = 'none'; }, 700);
+      statusEl.textContent = 'Pronto: ' + nome + '.wav' + (aviso ? ' · ' + aviso : '');
+      // Com aviso, o diálogo fica aberto para que ele possa ser lido.
+      if (!aviso) setTimeout(() => { dlg.style.display = 'none'; }, 700);
     } catch (e) { statusEl.textContent = 'Erro: ' + e.message; }
     finally { btnConfirmar.disabled = false; btnCancelar.disabled = false; }
   };
@@ -924,8 +1012,8 @@ export function atualizarPainel() {
   atualizarLegenda();
 }
 
-function avisoOmitidos() {
-  return motor.omitidos ? ` · ${motor.omitidos} parciais fracos omitidos por custo` : '';
+function avisoRender() {
+  return motor.avisos.length ? ' · ' + motor.avisos.join(' · ') : '';
 }
 
 function atualizarAvisoQuant(cam) {

@@ -17,10 +17,11 @@ export async function renderizarOffline(projeto, opcoes = {}, progresso = null) 
   const dur = Math.max(0.5, projeto.duracaoTotal + duracaoExtra);
 
   const { eventos } = calcularEventos(projeto, opcoes.somenteCamadaId || null);
-  const omitidos = await prepararContinuos(eventos, sampleRate, (n, total) => {
+  const { omitidos, avisos } = await prepararContinuos(eventos, sampleRate, (n, total) => {
     if (progresso && total) progresso(0.02 + 0.03 * n / total);
   });
-  if (omitidos) console.warn(`Som contínuo: ${omitidos} parciais fracos omitidos por custo.`);
+  if (omitidos) avisos.push(`${omitidos} parciais fracos omitidos por custo`);
+  if (avisos.length && opcoes.aoAvisar) opcoes.aoAvisar(avisos.join(' · '));
 
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const ctx = new OAC(2, Math.ceil(dur * sampleRate), sampleRate);
