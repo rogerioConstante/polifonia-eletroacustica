@@ -22,6 +22,12 @@
 // gerou) e ele próprio estiverem dentro do polígono. Os parciais
 // mantêm a frequência natural: não são quantizados.
 //
+// Glissando (desc.modo === 'gliss'): feixe de N trajetórias contínuas.
+// Cada uma mantém uma proporção fixa u = i/(N-1) da área em log-
+// frequência, então u = 0 e u = 1 seguem as bordas. Aqui os parciais de
+// Aditiva e FM acompanham a trajetória mesmo fora do polígono: só são
+// retirados os inaudíveis ou acima de Nyquist.
+//
 // Módulo puro: sem DOM e sem Web Audio. Roda dentro do Worker.
 // ============================================================
 
@@ -35,6 +41,9 @@ const MAX_GRAOS = 2e6;
 const STFT_N = 4096;
 const STFT_HOP = 1024;
 const DENSIDADE_GRAOS_PADRAO = 100;
+const CTRL_AMOSTRAS = 64;        // taxa de controle das trajetórias
+const SALTO_OITAVAS = 0.25;      // variação num quadro tratada como salto
+const LARGURA_BANDA_PADRAO_ST = 1;
 
 // ------------------------------------------------------------
 // PRNG (a mesma família usada em audio.js)
@@ -81,6 +90,21 @@ export function intervalosEmAltura(poly, l) {
     }
   }
   return pares(c);
+}
+
+/** Altura na proporção u da área: percorre as regiões do instante t,
+ *  sem atravessar os vazios de um polígono côncavo. */
+export function alturaNaProporcao(intervalos, u) {
+  if (!intervalos.length) return null;
+  let total = 0;
+  for (const [a, b] of intervalos) total += b - a;
+  let resto = u * total;
+  for (const [a, b] of intervalos) {
+    const L = b - a;
+    if (resto <= L) return a + resto;
+    resto -= L;
+  }
+  return intervalos[intervalos.length - 1][1];
 }
 
 function pares(c) {
@@ -255,6 +279,22 @@ function renderCluster(desc, sr, n, poly, lMin, lMax) {
 // ------------------------------------------------------------
 // Render: granular
 // ------------------------------------------------------------
+/** Grão de L amostras; o incremento de fase vai de w0 a w1. */
+function somarGrao(saida, i0, L, w0, w1, fase, suav, sr) {
+  const R = Math.max(Math.round(0.0005 * sr), Math.round(0.5 * suav * L));
+  const Rlim = Math.min(R, L >> 1);
+  const dw = (w1 - w0) / L;
+  let w = w0;
+  const fim = Math.min(L, saida.length - i0);
+  for (let k = 0; k < fim; k++) {
+    const borda = Math.min(k, L - 1 - k);
+    const g = borda < Rlim ? (borda + 0.5) / Rlim : 1;
+    saida[i0 + k] += g * Math.sin(fase);
+    fase += w;
+    w += dw;
+  }
+}
+
 function renderGranular(desc, sr, n, poly, lMin, lMax) {
   const { t0, t1, timbre, quant } = desc;
   const saida = new Float64Array(n);
@@ -294,14 +334,7 @@ function renderGranular(desc, sr, n, poly, lMin, lMax) {
     if (L < 8) continue;
     const i0 = Math.round((ini - t0) * sr);
     const w = 2 * Math.PI * Math.pow(2, l) / sr;
-    const fase = sorteioFase * 2 * Math.PI;
-    const R = Math.max(Math.round(0.0005 * sr), Math.round(0.5 * suav * L));
-    const Rlim = Math.min(R, L >> 1);
-    for (let k = 0; k < L && i0 + k < n; k++) {
-      const borda = Math.min(k, L - 1 - k);
-      const g = borda < Rlim ? (borda + 0.5) / Rlim : 1;
-      saida[i0 + k] += g * Math.sin(fase + w * k);
-    }
+    somarGrao(saida, i0, L, w, w, sorteioFase * 2 * Math.PI, suav, sr);
     itens++;
   }
   return { saida, omitidos: 0, itens };
@@ -343,7 +376,7 @@ export function fft(re, im, inversa = false) {
   }
 }
 
-function renderRuido(desc, sr, n, poly) {
+function renderRuido(desc, sr, n, faixasEm) {
   const { t0, t1 } = desc;
   const N = STFT_N, H = STFT_HOP;
   const saida = new Float64Array(n);
@@ -366,7 +399,7 @@ function renderRuido(desc, sr, n, poly) {
     // Quadros além das extremidades usam a máscara da extremidade,
     // para que o início e o fim do objeto não sejam arredondados.
     const tC = Math.min(t1 - eps, Math.max(t0 + eps, t0 + (s + N / 2) / sr));
-    const ints = intervalosEmTempo(poly, tC);
+    const ints = faixasEm(tC);
     if (!ints.length) continue;
 
     pesos.fill(0);
@@ -405,6 +438,164 @@ function renderRuido(desc, sr, n, poly) {
 }
 
 // ------------------------------------------------------------
+// Render: glissando
+// ------------------------------------------------------------
+function numeroDeTrajetorias(desc) {
+  return Math.max(2, Math.min(100, Math.round(desc.nGliss ?? 24)));
+}
+
+/** Calcula as N trajetórias na taxa de controle.
+ *  linhas[i][k] = log2(f); ganhos[i][k] = 0..1 (fecha nos saltos). */
+function calcularTrajetorias(desc, sr, n, poly) {
+  const { t0, t1 } = desc;
+  const N = numeroDeTrajetorias(desc);
+  const quadros = Math.ceil(n / CTRL_AMOSTRAS) + 2;
+  const linhas = [], ganhos = [];
+  for (let i = 0; i < N; i++) {
+    linhas.push(new Float64Array(quadros));
+    ganhos.push(new Float32Array(quadros));
+  }
+  const eps = 1e-6;
+  for (let k = 0; k < quadros; k++) {
+    const t = Math.min(t1 - eps, Math.max(t0 + eps, t0 + k * CTRL_AMOSTRAS / sr));
+    const ints = intervalosEmTempo(poly, t);
+    for (let i = 0; i < N; i++) {
+      const l = alturaNaProporcao(ints, i / (N - 1));
+      if (l == null) {
+        linhas[i][k] = k > 0 ? linhas[i][k - 1] : 0;
+      } else {
+        linhas[i][k] = l;
+        ganhos[i][k] = 1;
+      }
+    }
+  }
+  // Salto brusco (ex.: degrau vertical): silencia ao redor e suaviza,
+  // para a linha reaparecer na nova altura sem clique.
+  const passoG = CTRL_AMOSTRAS / Math.max(1, FADE_S * sr);
+  for (let i = 0; i < N; i++) {
+    const L = linhas[i], G = ganhos[i];
+    for (let k = 1; k < quadros; k++) {
+      if (Math.abs(L[k] - L[k - 1]) > SALTO_OITAVAS) { G[k - 1] = 0; G[k] = 0; }
+    }
+    for (let k = 1; k < quadros; k++) G[k] = Math.min(G[k], G[k - 1] + passoG);
+    for (let k = quadros - 2; k >= 0; k--) G[k] = Math.min(G[k], G[k + 1] + passoG);
+  }
+  return { linhas, ganhos, N, quadros };
+}
+
+/** Atenua parciais inaudíveis (< 20 Hz) ou perto de Nyquist. */
+function ganhoDeFaixa(f, sr) {
+  const alto = (0.49 * sr - f) / (0.04 * sr);
+  const baixo = (f - 10) / 10;
+  return Math.max(0, Math.min(1, alto, baixo));
+}
+
+function somarParcialMovel(saida, L, G, r, a, fase, sr) {
+  const H = CTRL_AMOSTRAS;
+  const n = saida.length;
+  const kW = 2 * Math.PI * r / sr;
+  let f0 = r * Math.pow(2, L[0]);
+  let w0 = kW * Math.pow(2, L[0]);
+  let g0 = a * G[0] * ganhoDeFaixa(f0, sr);
+  for (let k = 0, ini = 0; ini < n; k++, ini += H) {
+    const f1 = r * Math.pow(2, L[k + 1]);
+    const w1 = kW * Math.pow(2, L[k + 1]);
+    const g1 = a * G[k + 1] * ganhoDeFaixa(f1, sr);
+    const dw = (w1 - w0) / H;
+    if (g0 > 0 || g1 > 0) {
+      // z = e^{i·fase}, avançado por r = e^{i·w}; r avança por q = e^{i·dw}.
+      let zr = Math.cos(fase), zi = Math.sin(fase);
+      let rr = Math.cos(w0), ri = Math.sin(w0);
+      const qr = Math.cos(dw), qi = Math.sin(dw);
+      const dg = (g1 - g0) / H;
+      let g = g0;
+      const fim = Math.min(n, ini + H);
+      for (let i = ini; i < fim; i++) {
+        saida[i] += g * zi;
+        g += dg;
+        const nz = zr * rr - zi * ri;
+        zi = zr * ri + zi * rr;
+        zr = nz;
+        const nr = rr * qr - ri * qi;
+        ri = rr * qi + ri * qr;
+        rr = nr;
+      }
+    }
+    fase += H * w0 + dw * H * (H - 1) / 2;
+    if (fase > 1e6) fase %= 2 * Math.PI;
+    w0 = w1; g0 = g1;
+  }
+}
+
+function renderGlissParciais(desc, sr, n, poly) {
+  const saida = new Float64Array(n);
+  const { linhas, ganhos, N } = calcularTrajetorias(desc, sr, n, poly);
+  const molde = moldeEspectral(desc.timbre).slice().sort((a, b) => b.a - a.a);
+  const r = prng((desc.semente ^ 0x41C64E6D) >>> 0);
+  const itens = [];
+  for (let i = 0; i < N; i++) {
+    for (const p of molde) itens.push({ i, r: p.r, a: p.a, fase: r() * 2 * Math.PI });
+  }
+  itens.sort((x, y) => y.a - x.a);
+  let custo = 0, omitidos = 0;
+  for (const it of itens) {
+    custo += n;
+    if (custo > ORCAMENTO_AMOSTRAS) { omitidos++; continue; }
+    somarParcialMovel(saida, linhas[it.i], ganhos[it.i], it.r, it.a, it.fase, sr);
+  }
+  return { saida, omitidos, itens: itens.length };
+}
+
+function renderGlissGranular(desc, sr, n, poly) {
+  const { t0, t1, timbre } = desc;
+  const saida = new Float64Array(n);
+  const { linhas, ganhos, N } = calcularTrajetorias(desc, sr, n, poly);
+  const r = prng((desc.semente ^ 0x3C6EF372) >>> 0);
+  const durBase = (timbre.duracaoGraoMs ?? 30) / 1000;
+  const aleat = (timbre.aleatoriedadeGrao ?? 0) / 100;
+  const suav = Math.min(100, Math.max(0, timbre.suavizacaoEnv ?? 50)) / 100;
+  const dens = Math.max(0.1, timbre.densidadeGraos ?? DENSIDADE_GRAOS_PADRAO);
+  const porLinha = Math.min(MAX_GRAOS / N, Math.ceil(dens * (t1 - t0)));
+  const incremento = (l) => 2 * Math.PI * Math.pow(2, l) / sr;
+  let itens = 0;
+  for (let i = 0; i < N; i++) {
+    const L = linhas[i], G = ganhos[i];
+    for (let c = 0; c < porLinha; c++) {
+      const centro = r() * n;
+      const fase = r() * 2 * Math.PI;
+      const dur = Math.max(0.002, durBase * (1 + aleat * (r() * 2 - 1))) * sr;
+      const ini = Math.max(0, Math.round(centro - dur / 2));
+      const fim = Math.min(n, Math.round(centro + dur / 2));
+      const tam = fim - ini;
+      if (tam < 8) continue;
+      const kA = Math.floor(ini / CTRL_AMOSTRAS), kB = Math.floor((fim - 1) / CTRL_AMOSTRAS);
+      if (G[kA] < 0.5 || G[kB] < 0.5) continue;
+      if (Math.pow(2, Math.max(L[kA], L[kB])) > sr * 0.49) continue;
+      somarGrao(saida, ini, tam, incremento(L[kA]), incremento(L[kB]), fase, suav, sr);
+      itens++;
+    }
+  }
+  return { saida, omitidos: 0, itens };
+}
+
+/** Bandas de ruído centradas em cada trajetória, inclusive nos vértices,
+ *  onde a área tem largura zero. */
+function faixasDoGliss(desc, poly) {
+  const N = numeroDeTrajetorias(desc);
+  const larguraSt = Math.max(0.1, desc.timbre.larguraBandaSt ?? LARGURA_BANDA_PADRAO_ST);
+  const meia = larguraSt / 24;  // semitons → metade em oitavas
+  return (t) => {
+    const ints = intervalosEmTempo(poly, t);
+    const out = [];
+    for (let i = 0; i < N; i++) {
+      const l = alturaNaProporcao(ints, i / (N - 1));
+      if (l != null) out.push([l - meia, l + meia]);
+    }
+    return out;
+  };
+}
+
+// ------------------------------------------------------------
 // Entrada
 // ------------------------------------------------------------
 /** desc: { vertices, timbre, quant, semente, t0, t1 }.
@@ -416,8 +607,13 @@ export function renderizarContinuo(desc, sr) {
   const lMin = Math.min(...ls), lMax = Math.max(...ls);
 
   let res;
-  if (desc.timbre.tipo === 'ruido') res = renderRuido(desc, sr, n, poly);
-  else if (desc.timbre.tipo === 'granular') res = renderGranular(desc, sr, n, poly, lMin, lMax);
+  if (desc.modo === 'gliss') {
+    if (desc.timbre.tipo === 'ruido') res = renderRuido(desc, sr, n, faixasDoGliss(desc, poly));
+    else if (desc.timbre.tipo === 'granular') res = renderGlissGranular(desc, sr, n, poly);
+    else res = renderGlissParciais(desc, sr, n, poly);
+  } else if (desc.timbre.tipo === 'ruido') {
+    res = renderRuido(desc, sr, n, (t) => intervalosEmTempo(poly, t));
+  } else if (desc.timbre.tipo === 'granular') res = renderGranular(desc, sr, n, poly, lMin, lMax);
   else res = renderCluster(desc, sr, n, poly, lMin, lMax);
 
   const { saida } = res;

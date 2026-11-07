@@ -39,10 +39,10 @@ export function timbrePadrao(tipo) {
         suavizacaoEnv: 50,
         aleatoriedadeGrao: 0,
         sobreposicao: 10,
-        // Som contínuo: grãos por segundo em cada oitava da área.
+        // Som contínuo: grãos/s por oitava. Glissando: grãos/s por trajetória.
         densidadeGraos: 100,
       };
-    case 'ruido':    return { tipo: 'ruido', q: 4 };
+    case 'ruido':    return { tipo: 'ruido', q: 4, larguraBandaSt: 1 };
     default:         return { tipo: 'sine' };
   }
 }
@@ -95,6 +95,8 @@ export function criarCamada(vertices = []) {
     // aleatoriedadeDuracao: 0..100 (%)
     multiplicadorDuracao: 1.0,
     aleatoriedadeDuracao: 0,
+    // Glissando: quantidade de trajetórias simultâneas (2..100).
+    densidadeGliss: 24,
     padraoRitmico: [1, 0, 1, 1],
     semente: Math.floor(Math.random() * 100000),
     quantizacaoAltura: { modo: 'livre' },  // 'livre' | 'semitons' | 'conjunto' | 'serie'
@@ -239,7 +241,8 @@ function migrarCamada(c) {
   for (const k of ['cor','padraoPreenchimento','volume','andamento',
                    'pulso','densidadeRitmica','padraoRitmico','semente',
                    'mudo','solo','origemSlots',
-                   'multiplicadorDuracao','aleatoriedadeDuracao']) {
+                   'multiplicadorDuracao','aleatoriedadeDuracao',
+                   'densidadeGliss']) {
     if (c[k] !== undefined) base[k] = c[k];
   }
 

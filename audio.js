@@ -4,7 +4,9 @@
 //
 // Tipos de objeto:
 //  - 'nota'     → ataques pulsados (grid do passo rítmico)
-//  - 'gliss'    → ataques com trajetória descendente/ascendente
+//  - 'gliss'    → feixe de trajetórias contínuas entre as bordas do
+//                  polígono (ver continuo.js); ignora ritmo, ADSR e
+//                  quantização
 //  - 'continuo' → material pré-calculado que preenche a área do
 //                  polígono (ver continuo.js); ignora ritmo, ADSR e
 //                  série de alturas
@@ -12,7 +14,7 @@
 // Timbres:
 //  - 'sine', 'aditiva', 'fm', 'granular', 'ruido'
 //
-// A duração de cada evento em 'nota' e 'gliss' é:
+// A duração de cada evento em 'nota' é:
 //   durBase = passo * multiplicadorDuracao
 //   se aleatoriedadeDuracao > 0:
 //     fator ∈ [1-k, 1+k], k = aleatoriedadeDuracao/100
@@ -300,22 +302,25 @@ export function gerarEventosCamada(cam, duracaoTotal) {
   const t1 = Math.min(duracaoTotal, tMax);
   if (t1 <= t0) return ev;
 
-  // ---- Som contínuo: um único evento, calculado por continuo.js ----
-  if (cam.tipoObjeto === 'continuo') {
+  // ---- Som contínuo e glissando: um único evento, calculado por continuo.js ----
+  if (cam.tipoObjeto === 'continuo' || cam.tipoObjeto === 'gliss') {
     const fs = cam.vertices.map(v => v.f);
     ev.push({
       t: t0,
       f: Math.sqrt(Math.min(...fs) * Math.max(...fs)),
       dur: t1 - t0,
-      tipoObjeto: 'continuo',
+      tipoObjeto: cam.tipoObjeto,
       timbre: cam.timbre || { tipo: 'sine' },
       vol: cam.volume != null ? cam.volume : 0.8,
       // Descritor próprio: t0/t1 não mudam mesmo que uma relação
       // desloque ev.t.
       _cont: {
+        modo: cam.tipoObjeto,
         vertices: cam.vertices.map(v => ({ t: v.t, f: v.f })),
         timbre: cam.timbre || { tipo: 'sine' },
-        quant: cam.quantizacaoAltura || { modo: 'livre' },
+        quant: cam.tipoObjeto === 'continuo'
+          ? (cam.quantizacaoAltura || { modo: 'livre' }) : null,
+        nGliss: cam.tipoObjeto === 'gliss' ? cam.densidadeGliss : null,
         semente: cam.semente,
         t0, t1,
       },
@@ -323,7 +328,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
     return ev;
   }
 
-  // ---- Nota / gliss: ataques pulsados ----
+  // ---- Nota: ataques pulsados ----
   const nSlots = Math.max(1, Math.floor((t1 - t0) / passo));
   let idxPadrao = 0;
 
@@ -353,12 +358,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       }
     }
     if (!usadoSerie) {
-      if (cam.tipoObjeto === 'gliss') {
-        const k = (i % 8) / 7;
-        f = fMinRef + (fMaxRef - fMinRef) * (r1 * 0.2 + k * 0.8);
-      } else {
-        f = fMinRef + (fMaxRef - fMinRef) * r1;
-      }
+      f = fMinRef + (fMaxRef - fMinRef) * r1;
       f = quantizar(f, cam.quantizacaoAltura);
       midiAnterior = hzParaMidi(f);
     }
@@ -392,7 +392,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
 // Síntese de um evento
 // ------------------------------------------------------------
 export function sintetizarEvento(ctx, dest, ev) {
-  if (ev.tipoObjeto === 'continuo') return;  // ver agendarContinuos()
+  if (ev._cont) return;  // ver agendarContinuos()
   const t0 = ev.t;
   const dur = Math.max(0.005, ev.dur);
   const t1 = t0 + dur;
@@ -400,11 +400,9 @@ export function sintetizarEvento(ctx, dest, ev) {
   const env = ev.env || { a:5, d:10, s:70, r:15, nivelSustain:0.7, rigor:100 };
   const envNode = agendarEnvelope(ctx, dest, env, t0, dur, peak);
 
-  const tipoObjeto = ev.tipoObjeto || 'nota';
   const timbre = ev.timbre || { tipo: 'sine' };
 
-  // ---------- Ataques (nota / gliss) ----------
-  // Escolhe o timbre. O tipo de objeto apenas dá o contorno temporal.
+  // ---------- Ataques (nota) ----------
   if (timbre.tipo === 'granular') {
     sintetizarGranularAtaque(ctx, envNode, ev, t0, t1, timbre);
     return;
@@ -413,16 +411,12 @@ export function sintetizarEvento(ctx, dest, ev) {
     sintetizarRuidoAtaque(ctx, envNode, ev, t0, t1, timbre);
     return;
   }
-  if (tipoObjeto === 'gliss') {
-    sintetizarGliss(ctx, envNode, ev, t0, t1);
-    return;
-  }
   // nota + sine/aditiva/fm
   sintetizarNota(ctx, envNode, ev, t0, t1, timbre);
 }
 
 // ------------------------------------------------------------
-// Síntese: nota / gliss (timbres senoidal, aditivo, FM)
+// Síntese: nota (timbres senoidal, aditivo, FM)
 // ------------------------------------------------------------
 function sintetizarNota(ctx, dest, ev, t0, t1, timbre) {
   const f = ev.f;
@@ -463,16 +457,6 @@ function sintetizarNota(ctx, dest, ev, t0, t1, timbre) {
   const o = ctx.createOscillator();
   o.type = 'sine';
   o.frequency.setValueAtTime(f, t0);
-  o.connect(dest);
-  o.start(t0); o.stop(t1);
-}
-
-function sintetizarGliss(ctx, dest, ev, t0, t1) {
-  const f = ev.f;
-  const o = ctx.createOscillator();
-  o.type = 'sine';
-  o.frequency.setValueAtTime(f, t0);
-  o.frequency.linearRampToValueAtTime(f * (0.5 + 0.5 * Math.abs(Math.sin(f))), t1);
   o.connect(dest);
   o.start(t0); o.stop(t1);
 }
@@ -528,7 +512,7 @@ function sintetizarGranularAtaque(ctx, dest, ev, t0, t1, timbre) {
 }
 
 // ------------------------------------------------------------
-// Som contínuo: cálculo em Worker, cache e agendamento
+// Som contínuo e glissando: cálculo em Worker, cache e agendamento
 // ------------------------------------------------------------
 const CACHE_CONTINUO_MAX_AMOSTRAS = 120e6;  // ≈ 480 MB
 const cacheContinuo = new Map();            // chave → Promise<resultado>
@@ -589,7 +573,7 @@ async function limitarCacheContinuo() {
 export async function prepararContinuos(eventos, sampleRate, aoProgredir = null) {
   const lista = [];
   for (const evs of eventos.values())
-    for (const ev of evs) if (ev.tipoObjeto === 'continuo') lista.push(ev);
+    for (const ev of evs) if (ev._cont) lista.push(ev);
   let prontos = 0, omitidos = 0;
   if (aoProgredir && lista.length) aoProgredir(0, lista.length);
   await Promise.all(lista.map(async (ev) => {
@@ -610,7 +594,7 @@ function agendarContinuos(ctx, projeto, eventos, grafo, inicioCtx, deTempo) {
     const evs = eventos.get(cam.id);
     if (!nos || !evs) continue;
     for (const ev of evs) {
-      if (ev.tipoObjeto !== 'continuo' || !ev._render) continue;
+      if (!ev._cont || !ev._render) continue;
       const { t0, t1 } = ev._cont;
       if (deTempo >= t1) continue;
       const dados = ev._render.dados;
@@ -819,7 +803,7 @@ export const motor = {
     this.atingidos = atingidos;
 
     const omitidos = await prepararContinuos(eventos, this.ctx.sampleRate, (n, total) => {
-      if (n < total && this._onStatus) this._onStatus(`calculando som contínuo (${n}/${total})…`);
+      if (n < total && this._onStatus) this._onStatus(`calculando sons (${n}/${total})…`);
     });
     if (token !== this._tokenPlay) return false;  // stop ou novo play durante o cálculo
     this.omitidos = omitidos;

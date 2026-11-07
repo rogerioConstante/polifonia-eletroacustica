@@ -451,6 +451,7 @@ function ligarPainelCamada() {
     cPadrao: (c, el) => { c.padraoPreenchimento = el.value; },
     cTipo:   (c, el) => { c.tipoObjeto = el.value; },
     cVol:    (c, el) => { c.volume = +el.value; },
+    cNGliss: (c, el) => { c.densidadeGliss = Math.max(2, Math.min(100, Math.round(+el.value) || 2)); },
     cDens:   (c, el) => { c.densidadeRitmica = +el.value; },
     cSemente:(c, el) => { c.semente = +el.value; },
     cMudo:   (c, el) => { c.mudo = el.checked; },
@@ -608,6 +609,8 @@ function renderizarTimbre(cam) {
     campo('aleatoriedadeGrao','Aleatoriedade',  0,  100, 1,   t.aleatoriedadeGrao ?? 0, '%');
     if (cam.tipoObjeto === 'continuo') {
       campo('densidadeGraos', 'Densidade', 1, 2000, 1, t.densidadeGraos ?? 100, 'grãos/s por oitava');
+    } else if (cam.tipoObjeto === 'gliss') {
+      campo('densidadeGraos', 'Densidade', 1, 2000, 1, t.densidadeGraos ?? 100, 'grãos/s por glissando');
     } else {
       campo('sobreposicao',  'Sobreposição',    0,   50, 1,   t.sobreposicao    ?? 10, '%');
     }
@@ -615,6 +618,8 @@ function renderizarTimbre(cam) {
     if (cam.tipoObjeto === 'continuo') {
       const d = document.createElement('div'); d.className = 'dica';
       d.textContent = 'Ruído branco limitado à área do polígono.'; box.appendChild(d);
+    } else if (cam.tipoObjeto === 'gliss') {
+      campo('larguraBandaSt', 'Largura da banda', 0.1, 12, 0.1, t.larguraBandaSt ?? 1, 'semitons');
     } else {
       campo('q', 'Q do filtro', 0.1, 30, 0.1, t.q ?? 4);
     }
@@ -860,10 +865,15 @@ export function atualizarPainel() {
     // Quantização
     const modo = cam.quantizacaoAltura.modo || 'livre';
     const continuo = cam.tipoObjeto === 'continuo';
-    // Ritmo e ADSR não se aplicam ao som contínuo; a série também não
-    // (o dado fica guardado e volta se o tipo de objeto mudar).
-    document.getElementById('blocoRitmo').style.display = continuo ? 'none' : 'block';
-    document.getElementById('blocoEnvelope').style.display = continuo ? 'none' : 'block';
+    const gliss = cam.tipoObjeto === 'gliss';
+    // Ritmo e ADSR valem só para Nota. No som contínuo a série fica
+    // indisponível; no glissando, toda a quantização. Os dados ficam
+    // guardados e voltam se o tipo de objeto mudar.
+    document.getElementById('blocoRitmo').style.display = (continuo || gliss) ? 'none' : 'block';
+    document.getElementById('blocoEnvelope').style.display = (continuo || gliss) ? 'none' : 'block';
+    document.getElementById('blocoAltura').style.display = gliss ? 'none' : 'block';
+    document.getElementById('blocoGliss').style.display = gliss ? 'block' : 'none';
+    document.getElementById('cNGliss').value = cam.densidadeGliss ?? 24;
     document.getElementById('cQuantSerie').disabled = continuo;
     const modoVisivel = (continuo && modo === 'serie') ? 'livre' : modo;
     document.getElementById('cQuant').value = modoVisivel;

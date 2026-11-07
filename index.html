@@ -63,6 +63,11 @@
             <option value="continuo">Som contínuo</option>
           </select>
         </label>
+        <div id="blocoGliss" style="display:none">
+          <label title="Quantidade de trajetórias; com 2, soam apenas as bordas">Densidade (glissandos)
+            <input type="number" id="cNGliss" min="2" max="100" step="1" value="24">
+          </label>
+        </div>
         <label>Volume <input type="range" id="cVol" min="0" max="1" step="0.01" value="0.8"><span id="cVolVal">0.80</span></label>
 
         <div id="blocoRitmo">
@@ -89,6 +94,7 @@
         </label>
         </div>
 
+        <div id="blocoAltura">
         <hr>
         <h3>Altura</h3>
         <label title="livre | semitons | conjunto | série">Quantização
@@ -123,6 +129,7 @@
             </select>
           </label>
           <div id="cSerieResumo" class="resumo"></div>
+        </div>
         </div>
 
         <hr>
