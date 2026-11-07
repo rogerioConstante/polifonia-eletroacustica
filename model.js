@@ -39,6 +39,8 @@ export function timbrePadrao(tipo) {
         suavizacaoEnv: 50,
         aleatoriedadeGrao: 0,
         sobreposicao: 10,
+        // Som contínuo: grãos por segundo em cada oitava da área.
+        densidadeGraos: 100,
       };
     case 'ruido':    return { tipo: 'ruido', q: 4 };
     default:         return { tipo: 'sine' };

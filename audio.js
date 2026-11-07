@@ -5,7 +5,9 @@
 // Tipos de objeto:
 //  - 'nota'     → ataques pulsados (grid do passo rítmico)
 //  - 'gliss'    → ataques com trajetória descendente/ascendente
-//  - 'continuo' → um único evento cobrindo [tMin, tMax] do polígono
+//  - 'continuo' → material pré-calculado que preenche a área do
+//                  polígono (ver continuo.js); ignora ritmo, ADSR e
+//                  série de alturas
 //
 // Timbres:
 //  - 'sine', 'aditiva', 'fm', 'granular', 'ruido'
@@ -24,10 +26,6 @@ import { aplicarRelacoes } from './relations.js';
 import { parseSerie } from './serie.js';
 
 export const CAUDA_CAMADA_S = 0;
-
-// Número de osciladores por oitava no cluster senoidal/aditivo
-// do som contínuo.
-export const SENOIDES_POR_OITAVA = 6;
 
 // ------------------------------------------------------------
 // PRNG
@@ -140,19 +138,6 @@ export function faixaVerticalEm(vertices, t) {
   const ints = intervalosVerticaisEm(vertices, t);
   if (!ints.length) return null;
   return [ints[0][0], ints[ints.length - 1][1]];
-}
-
-/** Faixa (fMin, fMax) “principal” para o som contínuo em t.
- *  Se o polígono for côncavo, escolhe a faixa mais larga. */
-function faixaPrincipalEm(vertices, t) {
-  const ints = intervalosVerticaisEm(vertices, t);
-  if (!ints.length) return null;
-  let melhor = ints[0], melhorLarg = ints[0][1] - ints[0][0];
-  for (const [a, b] of ints) {
-    const L = b - a;
-    if (L > melhorLarg) { melhorLarg = L; melhor = [a, b]; }
-  }
-  return melhor;
 }
 
 function faixaMaisProxima(ints, fAlvo) {
@@ -315,30 +300,25 @@ export function gerarEventosCamada(cam, duracaoTotal) {
   const t1 = Math.min(duracaoTotal, tMax);
   if (t1 <= t0) return ev;
 
-  // ---- Som contínuo: um único evento ----
+  // ---- Som contínuo: um único evento, calculado por continuo.js ----
   if (cam.tipoObjeto === 'continuo') {
-    const faixaIni = faixaPrincipalEm(cam.vertices, t0);
-    if (!faixaIni) return ev;
-    let fCentro = (faixaIni[0] + faixaIni[1]) / 2;
-    // série, se ativa, desloca o centro a partir de uma nota MIDI.
-    if (serieAtiva && serieValores.length) {
-      const token = serieValores[0];
-      if (token != null) {
-        const cand = alturaDaSerie(token, cam, [faixaIni], rSerie, null);
-        if (cand != null) fCentro = cand;
-      }
-    }
-    const envEv = sortearEnvelope(envBase, envBase.rigor, rEnv);
+    const fs = cam.vertices.map(v => v.f);
     ev.push({
       t: t0,
-      f: fCentro,
+      f: Math.sqrt(Math.min(...fs) * Math.max(...fs)),
       dur: t1 - t0,
       tipoObjeto: 'continuo',
       timbre: cam.timbre || { tipo: 'sine' },
       vol: cam.volume != null ? cam.volume : 0.8,
-      env: envEv,
-      // guardamos os vértices para a automação de fMin/fMax na síntese.
-      _vertices: cam.vertices,
+      // Descritor próprio: t0/t1 não mudam mesmo que uma relação
+      // desloque ev.t.
+      _cont: {
+        vertices: cam.vertices.map(v => ({ t: v.t, f: v.f })),
+        timbre: cam.timbre || { tipo: 'sine' },
+        quant: cam.quantizacaoAltura || { modo: 'livre' },
+        semente: cam.semente,
+        t0, t1,
+      },
     });
     return ev;
   }
@@ -412,6 +392,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
 // Síntese de um evento
 // ------------------------------------------------------------
 export function sintetizarEvento(ctx, dest, ev) {
+  if (ev.tipoObjeto === 'continuo') return;  // ver agendarContinuos()
   const t0 = ev.t;
   const dur = Math.max(0.005, ev.dur);
   const t1 = t0 + dur;
@@ -421,12 +402,6 @@ export function sintetizarEvento(ctx, dest, ev) {
 
   const tipoObjeto = ev.tipoObjeto || 'nota';
   const timbre = ev.timbre || { tipo: 'sine' };
-
-  // ---------- Som contínuo ----------
-  if (tipoObjeto === 'continuo') {
-    sintetizarContinuo(ctx, envNode, ev, t0, t1, timbre);
-    return;
-  }
 
   // ---------- Ataques (nota / gliss) ----------
   // Escolhe o timbre. O tipo de objeto apenas dá o contorno temporal.
@@ -553,135 +528,108 @@ function sintetizarGranularAtaque(ctx, dest, ev, t0, t1, timbre) {
 }
 
 // ------------------------------------------------------------
-// Síntese: som contínuo
+// Som contínuo: cálculo em Worker, cache e agendamento
 // ------------------------------------------------------------
-//
-// Um único evento cobre [tMin, tMax]. A cada instante, a faixa
-// [fMin(t), fMax(t)] é lida do polígono; as frequências são
-// automatizadas por rampas curtas.
-function sintetizarContinuo(ctx, dest, ev, t0, t1, timbre) {
-  const durTotal = t1 - t0;
-  const verts = ev._vertices;
-  const PASSO = 0.05; // 50 ms entre rampas de frequência
+const CACHE_CONTINUO_MAX_AMOSTRAS = 120e6;  // ≈ 480 MB
+const cacheContinuo = new Map();            // chave → Promise<resultado>
+let workerContinuo = null;
+let proximoJob = 1;
+const jobsContinuo = new Map();
 
-  // Helper: agenda rampas de uma AudioParam com um gerador de
-  // valores f(t) ao longo de [t0, t1].
-  const agendarRampa = (param, gerador, tAbs0, tAbs1) => {
-    let primeiro = true;
-    for (let t = tAbs0; t <= tAbs1 + 1e-9; t += PASSO) {
-      const v = gerador(t);
-      if (!(v > 0)) continue;
-      if (primeiro) { param.setValueAtTime(v, t); primeiro = false; }
-      else param.linearRampToValueAtTime(v, t);
-    }
-    // fecha até tAbs1 exato
-    const vf = gerador(tAbs1);
-    if (vf > 0) param.linearRampToValueAtTime(vf, tAbs1);
+function obterWorker() {
+  if (workerContinuo) return workerContinuo;
+  workerContinuo = new Worker(new URL('./continuo.worker.js', import.meta.url),
+                              { type: 'module' });
+  workerContinuo.onmessage = (e) => {
+    const job = jobsContinuo.get(e.data.id);
+    if (!job) return;
+    jobsContinuo.delete(e.data.id);
+    if (e.data.erro) job.rejeitar(new Error(e.data.erro));
+    else job.resolver(e.data);
   };
-
-  const fMinEm = (t) => {
-    const faixa = faixaPrincipalEm(verts, t);
-    return faixa ? faixa[0] : null;
+  workerContinuo.onerror = (e) => {
+    for (const job of jobsContinuo.values()) job.rejeitar(new Error(e.message));
+    jobsContinuo.clear();
+    workerContinuo = null;
   };
-  const fMaxEm = (t) => {
-    const faixa = faixaPrincipalEm(verts, t);
-    return faixa ? faixa[1] : null;
-  };
+  return workerContinuo;
+}
 
-  // ---------- sine / aditiva: cluster de senoides ----------
-  if (timbre.tipo === 'sine' || timbre.tipo === 'aditiva') {
-    const N_POR_OITAVA = SENOIDES_POR_OITAVA;
-    // Determina o número de osciladores na faixa MAIS LARGA
-    // durante o evento (para montar uma vez e rampear depois).
-    let fMinGlobal = Infinity, fMaxGlobal = 0;
-    for (let t = t0; t <= t1 + 1e-9; t += PASSO) {
-      const fa = faixaPrincipalEm(verts, t);
-      if (!fa) continue;
-      if (fa[0] < fMinGlobal) fMinGlobal = fa[0];
-      if (fa[1] > fMaxGlobal) fMaxGlobal = fa[1];
-    }
-    if (!(fMaxGlobal > 0) || !(fMinGlobal > 0) || fMaxGlobal <= fMinGlobal) {
-      // faixa degenerada: emite uma senoide simples no centro.
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.value = 220;
-      o.connect(dest);
-      o.start(t0); o.stop(t1);
-      return;
-    }
-    const oitavas = Math.log2(fMaxGlobal / fMinGlobal);
-    const N = Math.max(2, Math.round(oitavas * N_POR_OITAVA) + 1);
-    const amp = 1 / Math.sqrt(N);
+function calcularContinuo(desc, sr) {
+  const chave = JSON.stringify([sr, desc]);
+  const emCache = cacheContinuo.get(chave);
+  if (emCache) {
+    cacheContinuo.delete(chave); cacheContinuo.set(chave, emCache);  // recente
+    return emCache;
+  }
+  const promessa = new Promise((resolver, rejeitar) => {
+    const id = proximoJob++;
+    jobsContinuo.set(id, { resolver, rejeitar });
+    obterWorker().postMessage({ id, desc, sr });
+  });
+  cacheContinuo.set(chave, promessa);
+  promessa.then(limitarCacheContinuo, () => cacheContinuo.delete(chave));
+  return promessa;
+}
 
-    for (let i = 0; i < N; i++) {
-      const u = i / (N - 1);
-      const o = ctx.createOscillator();
-      o.type = 'sine';
+async function limitarCacheContinuo() {
+  const chaves = [...cacheContinuo.keys()];
+  let total = 0;
+  for (let i = chaves.length - 1; i >= 0; i--) {
+    const r = await Promise.resolve(cacheContinuo.get(chaves[i])).catch(() => null);
+    total += r ? r.dados.length : 0;
+    if (total > CACHE_CONTINUO_MAX_AMOSTRAS && i < chaves.length - 1) {
+      cacheContinuo.delete(chaves[i]);
+    }
+  }
+}
+
+/** Calcula os sons contínuos pendentes. Guarda o resultado em ev._render
+ *  e devolve o número de parciais omitidos pelo limite de custo. */
+export async function prepararContinuos(eventos, sampleRate, aoProgredir = null) {
+  const lista = [];
+  for (const evs of eventos.values())
+    for (const ev of evs) if (ev.tipoObjeto === 'continuo') lista.push(ev);
+  let prontos = 0, omitidos = 0;
+  if (aoProgredir && lista.length) aoProgredir(0, lista.length);
+  await Promise.all(lista.map(async (ev) => {
+    const r = await calcularContinuo(ev._cont, sampleRate);
+    ev._render = r;
+    omitidos += r.omitidos || 0;
+    prontos++;
+    if (aoProgredir) aoProgredir(prontos, lista.length);
+  }));
+  return omitidos;
+}
+
+/** Agenda de uma só vez os sons contínuos ainda não terminados em deTempo. */
+function agendarContinuos(ctx, projeto, eventos, grafo, inicioCtx, deTempo) {
+  const FADE = 0.005;
+  for (const cam of projeto.camadas) {
+    const nos = grafo.camadas.get(cam.id);
+    const evs = eventos.get(cam.id);
+    if (!nos || !evs) continue;
+    for (const ev of evs) {
+      if (ev.tipoObjeto !== 'continuo' || !ev._render) continue;
+      const { t0, t1 } = ev._cont;
+      if (deTempo >= t1) continue;
+      const dados = ev._render.dados;
+      const buf = ctx.createBuffer(1, dados.length, ctx.sampleRate);
+      buf.copyToChannel(dados, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const deslocamento = Math.max(0, deTempo - t0);
+      const quando = inicioCtx + t0 + deslocamento;
       const g = ctx.createGain();
-      g.gain.value = amp;
-      o.connect(g); g.connect(dest);
-      // Rampa de frequência: f_i(t) = fMin(t) * (fMax(t)/fMin(t))^u
-      agendarRampa(o.frequency, (t) => {
-        const fMin = fMinEm(t); const fMax = fMaxEm(t);
-        if (!fMin || !fMax || fMax <= fMin) return 0;
-        return fMin * Math.pow(fMax / fMin, u);
-      }, t0, t1);
-      o.start(t0); o.stop(t1);
+      if (deslocamento > 0) {  // começo no meio do objeto: evita clique
+        g.gain.setValueAtTime(0, quando);
+        g.gain.linearRampToValueAtTime(1, quando + FADE);
+      }
+      src.connect(g); g.connect(nos.dinamica);
+      src.start(quando, deslocamento);
+      grafo.fontesContinuas.push(src);
     }
-    return;
   }
-
-  // ---------- fm / granular / ruido: banda larga + filtros ----------
-  // Fonte:
-  let fonte;
-  if (timbre.tipo === 'ruido') {
-    const dur = Math.max(0.05, durTotal);
-    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
-    const dd = buf.getChannelData(0);
-    const r = prng(0xC0FFEE);
-    for (let i = 0; i < dd.length; i++) dd[i] = r() * 2 - 1;
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    fonte = src;
-  } else if (timbre.tipo === 'fm') {
-    const razao = timbre.razao || 2;
-    const indice = timbre.indice || 3;
-    const carrier = ctx.createOscillator();
-    carrier.type = 'sine';
-    carrier.frequency.value = fMinEm(t0) || 220;
-    const mod = ctx.createOscillator();
-    mod.type = 'sine';
-    mod.frequency.value = (fMinEm(t0) || 220) * razao;
-    const modGain = ctx.createGain();
-    modGain.gain.value = (fMinEm(t0) || 220) * indice;
-    mod.connect(modGain); modGain.connect(carrier.frequency);
-    mod.start(t0); mod.stop(t1);
-    fonte = carrier;
-  } else { // granular contínuo: nuvem que alimenta o filtro.
-    const dur = Math.max(0.05, durTotal);
-    const buf = ctx.createBuffer(1, Math.max(1, Math.floor(ctx.sampleRate * dur)), ctx.sampleRate);
-    const dd = buf.getChannelData(0);
-    const r = prng(0xBEEF);
-    for (let i = 0; i < dd.length; i++) dd[i] = (r() * 2 - 1) * 0.7;
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    fonte = src;
-  }
-
-  // Filtros em cascata (passa-alta + passa-baixa) com cortes
-  // automatizados para acompanhar fMin(t) e fMax(t).
-  const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass';
-  hp.Q.value = 0.7;
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.Q.value = 0.7;
-
-  agendarRampa(hp.frequency, (t) => fMinEm(t) || 20, t0, t1);
-  agendarRampa(lp.frequency, (t) => fMaxEm(t) || 20000, t0, t1);
-
-  fonte.connect(hp); hp.connect(lp); lp.connect(dest);
-  fonte.start(t0); fonte.stop(t1);
 }
 
 // ------------------------------------------------------------
@@ -771,7 +719,7 @@ export function criarGrafo(ctx, projeto, opcoes = {}) {
     g.connect(send); send.connect(convolver);
     camadas.set(cam.id, { dinamica, gain: g, panner: pan, send });
   }
-  return { master, convolver, reverbGain, camadas };
+  return { master, convolver, reverbGain, camadas, fontesContinuas: [] };
 }
 
 export function agendarEventos(ctx, projeto, eventos, grafo, opcoes = {}) {
@@ -821,6 +769,9 @@ export function construirGrafo(ctx, projeto, eventos, opcoes = {}) {
     deTempo: opcoes.deTempo != null ? opcoes.deTempo : 0,
     janelaAte: opcoes.janelaAte != null ? opcoes.janelaAte : Infinity,
   });
+  agendarContinuos(ctx, projeto, eventos, grafo,
+    opcoes.inicioCtx != null ? opcoes.inicioCtx : 0,
+    opcoes.deTempo != null ? opcoes.deTempo : 0);
   return grafo;
 }
 
@@ -835,7 +786,8 @@ export const motor = {
   timerJanela: null, timerAnimacao: null,
   JANELA_S: 4.0, INTERVALO_MS: 250,
   _janelaAte: 0, _ate: Infinity,
-  _onFim: null, _onFrame: null,
+  _onFim: null, _onFrame: null, _onStatus: null,
+  _tokenPlay: 0, omitidos: 0,
 
   async garantirCtx() {
     if (!this.ctx) {
@@ -848,7 +800,11 @@ export const motor = {
   },
 
   async play(de = 0, opcoes = {}) {
+    const token = ++this._tokenPlay;
     await this.garantirCtx();
+    if (token !== this._tokenPlay) return false;
+    this._pararTimers();
+    this.tocando = false;
     this._desmontarGrafo();
     this.modo = opcoes.somenteCamadaId
       ? { somenteCamadaId: opcoes.somenteCamadaId, ate: opcoes.ate ?? Infinity } : null;
@@ -862,6 +818,12 @@ export const motor = {
     this.eventosPorCamada = eventos;
     this.atingidos = atingidos;
 
+    const omitidos = await prepararContinuos(eventos, this.ctx.sampleRate, (n, total) => {
+      if (n < total && this._onStatus) this._onStatus(`calculando som contínuo (${n}/${total})…`);
+    });
+    if (token !== this._tokenPlay) return false;  // stop ou novo play durante o cálculo
+    this.omitidos = omitidos;
+
     this.grafo = criarGrafo(this.ctx, estado.projeto, {
       somenteCamadaId: this.modo ? this.modo.somenteCamadaId : null,
     });
@@ -871,23 +833,27 @@ export const motor = {
     this.tPausa = de;
     this.tocando = true; this.pausado = false;
     this._janelaAte = de;
+    agendarContinuos(this.ctx, estado.projeto, eventos, this.grafo, this.tInicio, de);
     this._agendarJanela();
     this._iniciarAnimacao();
     if (this._onFrame) this._onFrame();
+    return true;
   },
 
   async retomar() {
     if (!this.pausado) return;
     const de = this.tPausa;
     if (this.modo && this.modo.somenteCamadaId) {
-      await this.play(de, { somenteCamadaId: this.modo.somenteCamadaId, ate: this.modo.ate });
-    } else await this.play(de, {});
+      return this.play(de, { somenteCamadaId: this.modo.somenteCamadaId, ate: this.modo.ate });
+    }
+    return this.play(de, {});
   },
 
   pausar() {
     if (!this.tocando) return;
-    this.pausado = true; this.tocando = false;
+    this._tokenPlay++;
     this.tPausa = this.tempoAtual();
+    this.pausado = true; this.tocando = false;
     this._pararTimers(); this._desmontarGrafo();
     window.__tempoReproducao = this.tPausa;
     atualizarTempoUI(this.tPausa);
@@ -895,6 +861,7 @@ export const motor = {
   },
 
   parar() {
+    this._tokenPlay++;
     const eraTocando = this.tocando;
     this.tocando = false; this.pausado = false;
     this.tPausa = 0; this.modo = null;
@@ -950,6 +917,10 @@ export const motor = {
 
   _desmontarGrafo() {
     if (!this.grafo) return;
+    for (const src of this.grafo.fontesContinuas) {
+      try { src.stop(); } catch(_){}
+      try { src.disconnect(); } catch(_){}
+    }
     try { this.grafo.master.disconnect(); } catch(_){}
     for (const c of this.grafo.camadas.values()) {
       try { c.dinamica.disconnect(); } catch(_){}
@@ -997,7 +968,8 @@ export async function tocarSomenteSelecionada() {
   const t0 = Math.max(0, Math.min(...cam.vertices.map(v => v.t)));
   const t1 = Math.min(estado.projeto.duracaoTotal, Math.max(...cam.vertices.map(v => v.t)));
   if (t1 <= t0) return false;
-  await motor.play(t0, { somenteCamadaId: cam.id, ate: t1 + CAUDA_CAMADA_S });
+  const iniciou = await motor.play(t0, { somenteCamadaId: cam.id, ate: t1 + CAUDA_CAMADA_S });
+  if (!iniciou) return false;
   if (typeof window.__rolarParaTempo === 'function') window.__rolarParaTempo(t0);
   return true;
 }

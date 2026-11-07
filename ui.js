@@ -44,6 +44,7 @@ export function initUI(canvasEl) {
   ligarExportacao();
 
   motor._onFrame = marcarRender;
+  motor._onStatus = setStatus;
   motor._onFim = () => {
     const btnPlay = document.getElementById('btnPlay');
     if (btnPlay) btnPlay.textContent = '▶';
@@ -79,8 +80,10 @@ function ligarTransporte() {
   btnPlay.onclick = async () => {
     try {
       if (motor.tocando) { motor.pausar(); btnPlay.textContent = '▶'; setStatus('pausado'); }
-      else if (motor.pausado) { await motor.retomar(); btnPlay.textContent = '⏸'; setStatus('tocando'); }
-      else { await motor.play(0, {}); btnPlay.textContent = '⏸'; setStatus('tocando'); }
+      else {
+        const ok = motor.pausado ? await motor.retomar() : await motor.play(0, {});
+        if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando' + avisoOmitidos()); }
+      }
     } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
   btnPlayCamada.onclick = async () => {
@@ -88,7 +91,7 @@ function ligarTransporte() {
       const cam = camadaSelecionada(); if (!cam) return;
       if (motor.tocando || motor.pausado) motor.parar();
       const ok = await tocarSomenteSelecionada();
-      if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando somente ' + cam.nome + ' (relações ignoradas)'); }
+      if (ok) { btnPlay.textContent = '⏸'; setStatus('tocando somente ' + cam.nome + ' (relações ignoradas)' + avisoOmitidos()); }
     } catch (e) { setStatus('erro de áudio: ' + e.message); }
   };
   btnStop.onclick = () => {
@@ -465,6 +468,7 @@ function ligarPainelCamada() {
         if (span) span.textContent = (+el.value).toFixed(2);
       }
       if (id === 'cDens') atualizarResumoRitmo();
+      if (id === 'cTipo') atualizarPainel();
       atualizarLista(); marcarRender();
     });
   }
@@ -556,6 +560,7 @@ function ligarPainelCamada() {
     const cam = camadaSelecionada(); if (!cam) return;
     cam.timbre = timbrePadrao(selT.value);
     renderizarTimbre(cam);
+    atualizarAvisoQuant(cam);
     marcarRender();
   });
 }
@@ -601,9 +606,18 @@ function renderizarTimbre(cam) {
     campo('duracaoGraoMs',   'Duração do grão', 10, 100, 1,   t.duracaoGraoMs   ?? 30, 'ms');
     campo('suavizacaoEnv',   'Suavização',      0,  100, 1,   t.suavizacaoEnv   ?? 50, '%');
     campo('aleatoriedadeGrao','Aleatoriedade',  0,  100, 1,   t.aleatoriedadeGrao ?? 0, '%');
-    campo('sobreposicao',    'Sobreposição',    0,   50, 1,   t.sobreposicao    ?? 10, '%');
+    if (cam.tipoObjeto === 'continuo') {
+      campo('densidadeGraos', 'Densidade', 1, 2000, 1, t.densidadeGraos ?? 100, 'grãos/s por oitava');
+    } else {
+      campo('sobreposicao',  'Sobreposição',    0,   50, 1,   t.sobreposicao    ?? 10, '%');
+    }
   } else if (t.tipo === 'ruido') {
-    campo('q', 'Q do filtro', 0.1, 30, 0.1, t.q ?? 4);
+    if (cam.tipoObjeto === 'continuo') {
+      const d = document.createElement('div'); d.className = 'dica';
+      d.textContent = 'Ruído branco limitado à área do polígono.'; box.appendChild(d);
+    } else {
+      campo('q', 'Q do filtro', 0.1, 30, 0.1, t.q ?? 4);
+    }
   }
 }
 
@@ -845,9 +859,17 @@ export function atualizarPainel() {
 
     // Quantização
     const modo = cam.quantizacaoAltura.modo || 'livre';
-    document.getElementById('cQuant').value = modo;
-    document.getElementById('conjuntoWrap').style.display = modo === 'conjunto' ? 'block' : 'none';
-    document.getElementById('serieWrap').style.display = modo === 'serie' ? 'block' : 'none';
+    const continuo = cam.tipoObjeto === 'continuo';
+    // Ritmo e ADSR não se aplicam ao som contínuo; a série também não
+    // (o dado fica guardado e volta se o tipo de objeto mudar).
+    document.getElementById('blocoRitmo').style.display = continuo ? 'none' : 'block';
+    document.getElementById('blocoEnvelope').style.display = continuo ? 'none' : 'block';
+    document.getElementById('cQuantSerie').disabled = continuo;
+    const modoVisivel = (continuo && modo === 'serie') ? 'livre' : modo;
+    document.getElementById('cQuant').value = modoVisivel;
+    document.getElementById('conjuntoWrap').style.display = modoVisivel === 'conjunto' ? 'block' : 'none';
+    document.getElementById('serieWrap').style.display = modoVisivel === 'serie' ? 'block' : 'none';
+    atualizarAvisoQuant(cam);
 
     if (modo === 'conjunto') {
       const classes = cam.quantizacaoAltura.classes || [];
@@ -890,6 +912,25 @@ export function atualizarPainel() {
   atualizarLista();
   atualizarListaRelacoes();
   atualizarLegenda();
+}
+
+function avisoOmitidos() {
+  return motor.omitidos ? ` · ${motor.omitidos} parciais fracos omitidos por custo` : '';
+}
+
+function atualizarAvisoQuant(cam) {
+  const el = document.getElementById('cQuantAviso');
+  if (!el) return;
+  let txt = '';
+  if (cam.tipoObjeto === 'continuo') {
+    if (cam.timbre && cam.timbre.tipo === 'ruido') {
+      txt = 'O ruído preenche toda a faixa: a quantização não se aplica.';
+    } else if (cam.quantizacaoAltura.modo === 'serie') {
+      txt = 'Série indisponível no som contínuo: soa como Livre.';
+    }
+  }
+  el.textContent = txt;
+  el.style.display = txt ? 'block' : 'none';
 }
 
 function atualizarResumoRitmo() {

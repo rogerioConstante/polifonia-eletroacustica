@@ -9,7 +9,7 @@
 // incluindo as automações de dinâmica, panorama e reverb — que
 // antes ficavam de fora.
 
-import { calcularEventos, construirGrafo } from './audio.js';
+import { calcularEventos, construirGrafo, prepararContinuos } from './audio.js';
 
 export async function renderizarOffline(projeto, opcoes = {}, progresso = null) {
   const sampleRate = opcoes.sampleRate || 44100;
@@ -17,6 +17,10 @@ export async function renderizarOffline(projeto, opcoes = {}, progresso = null) 
   const dur = Math.max(0.5, projeto.duracaoTotal + duracaoExtra);
 
   const { eventos } = calcularEventos(projeto, opcoes.somenteCamadaId || null);
+  const omitidos = await prepararContinuos(eventos, sampleRate, (n, total) => {
+    if (progresso && total) progresso(0.02 + 0.03 * n / total);
+  });
+  if (omitidos) console.warn(`Som contínuo: ${omitidos} parciais fracos omitidos por custo.`);
 
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const ctx = new OAC(2, Math.ceil(dur * sampleRate), sampleRate);
