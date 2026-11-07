@@ -226,15 +226,63 @@ function ligarMouse() {
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
   canvas.addEventListener('dblclick', onDblClick);
-  canvas.addEventListener('contextmenu', e => e.preventDefault());
+  canvas.addEventListener('contextmenu', onContextMenu);
   canvas.addEventListener('wheel', onWheel, { passive: false });
 }
+const RAIO_VERTICE_PX = 7;
+const RAIO_ARESTA_PX = 6;
+
+function verticeNoPonto(cam, x, y) {
+  return cam.vertices.findIndex(v =>
+    Math.hypot(tParaX(v.t) - x, fParaY(v.f) - y) < RAIO_VERTICE_PX);
+}
+
+/** Aresta mais próxima de (x, y), medida na tela, onde as arestas são
+ *  retas: { idx, x, y }, com idx = vértice inicial da aresta. */
+function arestaNoPonto(cam, x, y) {
+  const n = cam.vertices.length;
+  let melhor = null, melhorDist = RAIO_ARESTA_PX;
+  for (let i = 0; i < n; i++) {
+    const a = cam.vertices[i], b = cam.vertices[(i + 1) % n];
+    const ax = tParaX(a.t), ay = fParaY(a.f);
+    const dx = tParaX(b.t) - ax, dy = fParaY(b.f) - ay;
+    const L2 = dx * dx + dy * dy;
+    if (L2 === 0) continue;
+    const u = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+    const px = ax + u * dx, py = ay + u * dy;
+    const d = Math.hypot(px - x, py - y);
+    if (d < melhorDist) { melhorDist = d; melhor = { idx: i, x: px, y: py }; }
+  }
+  return melhor;
+}
+
+function onContextMenu(e) {
+  e.preventDefault();
+  if (estado.ferramenta !== 'select' || estado.selecao.length !== 1) return;
+  const cam = camadaSelecionada(); if (!cam) return;
+  const { x, y } = posMouse(e);
+  const idx = verticeNoPonto(cam, x, y);
+  if (idx < 0) return;
+  if (cam.vertices.length <= 3) { setStatus('um polígono precisa de ao menos 3 vértices'); return; }
+  pushUndo();
+  cam.vertices.splice(idx, 1);
+  setStatus('vértice removido');
+  marcarRender();
+}
+
 function posMouse(e) {
   const r = canvas.getBoundingClientRect();
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
+// Camada que já estava selecionada antes do 1º clique do duplo clique:
+// o clique que apenas seleciona uma camada não deve inserir vértice.
+let selecaoAntesDoClique = null;
+
 function onMouseDown(e) {
   if (e.button !== 0) return;
+  if (e.detail <= 1) {
+    selecaoAntesDoClique = estado.selecao.length === 1 ? estado.selecao[0] : null;
+  }
   const { x, y } = posMouse(e);
   if (x < CALHA_PX) return;
   const t = xParaT(x), f = yParaF(y);
@@ -246,11 +294,11 @@ function onMouseDown(e) {
   if (estado.selecao.length === 1) {
     const cam = camadaSelecionada();
     if (cam) {
-      for (let i = 0; i < cam.vertices.length; i++) {
-        const px = tParaX(cam.vertices[i].t);
-        const py = fParaY(cam.vertices[i].f);
-        if (Math.hypot(px - x, py - y) < 7) { pushUndo(); arrasto = { tipo: 'vertice', id: cam.id, idx: i }; return; }
-      }
+      const idx = verticeNoPonto(cam, x, y);
+      if (idx >= 0) { pushUndo(); arrasto = { tipo: 'vertice', id: cam.id, idx }; return; }
+      // Sobre a aresta, o clique não desfaz a seleção nem move a camada:
+      // o duplo clique que insere um vértice começa aqui.
+      if (arestaNoPonto(cam, x, y)) return;
     }
   }
   const cam = camadaNoPonto(t, f);
@@ -300,7 +348,21 @@ function onMouseMove(e) {
   marcarRender();
 }
 function onMouseUp() { if (arrasto) { arrasto = null; atualizarPainel(); } }
-function onDblClick() { if (estado.ferramenta === 'draw') fecharPoligono(); }
+function onDblClick(e) {
+  if (estado.ferramenta === 'draw') { fecharPoligono(); return; }
+  if (estado.selecao.length !== 1) return;
+  const cam = camadaSelecionada();
+  if (!cam || cam.id !== selecaoAntesDoClique) return;
+  const { x, y } = posMouse(e);
+  if (verticeNoPonto(cam, x, y) >= 0) return;
+  const aresta = arestaNoPonto(cam, x, y);
+  if (!aresta) return;
+  pushUndo();
+  cam.vertices.splice(aresta.idx + 1, 0,
+    { t: Math.max(0, xParaT(aresta.x)), f: snapAltura(yParaF(aresta.y)) });
+  setStatus('vértice inserido');
+  marcarRender();
+}
 function onWheel(e) {
   e.preventDefault();
   const { x } = posMouse(e);
