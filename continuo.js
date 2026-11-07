@@ -32,6 +32,9 @@
 // em função do tempo musical. Cada grão é sempre lido para a frente e
 // transposto para que a frequência dominante do trecho caia na altura-
 // alvo. No som contínuo, o resultado ainda passa pela máscara do polígono.
+// Com timbre.transporGrao === false não há transposição nem seleção de
+// grãos pela geometria: em todos os tipos de objeto, só a máscara delimita
+// as frequências, e o nível reflete a energia realmente presente na área.
 //
 // Módulo puro: sem DOM e sem Web Audio. Roda dentro do Worker.
 // ============================================================
@@ -359,6 +362,10 @@ function transposicao(alvo, dominante) {
   return Math.max(1 / TRANSPOSICAO_MAX, Math.min(TRANSPOSICAO_MAX, alvo / dominante));
 }
 
+function somenteFiltro(timbre, fonte) {
+  return !!fonte && timbre.transporGrao === false;
+}
+
 /** Cursor em vaivém, com desvio em uma janela ao redor da posição.
  *  Com 100%, a janela cobre todo o arquivo (posição uniforme). */
 function criarCursor(timbre, fonte, semente) {
@@ -411,8 +418,9 @@ function renderGranular(desc, sr, n, poly, lMin, lMax, fonte) {
   const dens = Math.max(0.1, timbre.densidadeGraos ?? DENSIDADE_GRAOS_PADRAO);
 
   // Em "livre" a altura do grão é contínua; nos demais, segue a grade.
+  const soFiltro = somenteFiltro(timbre, fonte);
   const modo = quant && quant.modo;
-  const grade = (modo === 'semitons' || modo === 'conjunto')
+  const grade = (!soFiltro && (modo === 'semitons' || modo === 'conjunto'))
     ? gradeDeAlturas(quant, Math.pow(2, lMin), Math.min(Math.pow(2, lMax), sr * 0.49))
     : null;
   if (grade && !grade.length) return { saida, omitidos: 0, itens: 0 };
@@ -431,7 +439,8 @@ function renderGranular(desc, sr, n, poly, lMin, lMax, fonte) {
       ? Math.log2(grade[Math.min(grade.length - 1, Math.floor(sorteioL * grade.length))])
       : lMin + sorteioL * (lMax - lMin);
     if (l > lTeto) continue;
-    const seg = intervalosEmAltura(poly, l).find(([a, b]) => tC >= a && tC <= b);
+    const seg = soFiltro ? [t0, t1]
+      : intervalosEmAltura(poly, l).find(([a, b]) => tC >= a && tC <= b);
     if (!seg) continue;
     const d = Math.max(0.002, durBase * (1 + aleat * (sorteioDur * 2 - 1)));
     // O grão é recortado para não atravessar a borda do polígono.
@@ -442,7 +451,7 @@ function renderGranular(desc, sr, n, poly, lMin, lMax, fonte) {
     const i0 = Math.round((ini - t0) * sr);
     if (fonte) {
       const inicio = cursor(ini);
-      const taxa = transposicao(Math.pow(2, l), dominanteEm(fonte, inicio));
+      const taxa = soFiltro ? 1 : transposicao(Math.pow(2, l), dominanteEm(fonte, inicio));
       somarGraoFonte(saida, i0, L, taxa, taxa, inicio, fonte, suav, sr);
     } else {
       const w = 2 * Math.PI * Math.pow(2, l) / sr;
@@ -693,8 +702,9 @@ function renderGlissGranular(desc, sr, n, poly, fonte) {
       if (fonte) {
         const inicio = cursor(t0 + ini / sr);
         const dom = dominanteEm(fonte, inicio);
-        const taxa0 = transposicao(Math.pow(2, L[kA]), dom);
-        const taxa1 = transposicao(Math.pow(2, L[kB]), dom);
+        const soFiltro = somenteFiltro(timbre, fonte);
+        const taxa0 = soFiltro ? 1 : transposicao(Math.pow(2, L[kA]), dom);
+        const taxa1 = soFiltro ? 1 : transposicao(Math.pow(2, L[kB]), dom);
         somarGraoFonte(saida, ini, tam, taxa0, taxa1, inicio, fonte, suav, sr);
       } else {
         somarGrao(saida, ini, tam, incremento(L[kA]), incremento(L[kB]), fase, suav, sr);
@@ -722,7 +732,7 @@ function renderNotaGranular(desc, sr, n, fonte) {
     const L = Math.round(Math.min(d, t1 - tG) * sr);
     if (L < 8) continue;
     const inicio = cursor(tG);
-    const taxa = transposicao(f, dominanteEm(fonte, inicio));
+    const taxa = somenteFiltro(timbre, fonte) ? 1 : transposicao(f, dominanteEm(fonte, inicio));
     somarGraoFonte(saida, Math.round((tG - t0) * sr), L, taxa, taxa, inicio, fonte, suav, sr);
     itens++;
   }
@@ -749,6 +759,15 @@ function faixasDoGliss(desc, poly) {
 // ------------------------------------------------------------
 // Entrada
 // ------------------------------------------------------------
+function picoDe(sinal) {
+  let pico = 0;
+  for (let i = 0; i < sinal.length; i++) {
+    const v = Math.abs(sinal[i]);
+    if (v > pico) pico = v;
+  }
+  return pico;
+}
+
 /** desc: { modo, vertices, timbre, quant, semente, t0, t1, nGliss, f }.
  *  fonte: { dados, sr, analise } quando o grão vem de um arquivo.
  *  Devolve { dados: Float32Array, omitidos, itens, pico }. */
@@ -769,12 +788,18 @@ export function renderizarContinuo(desc, sr, fonte = null) {
     res = renderRuido(desc, sr, n, (t) => intervalosEmTempo(poly, t));
   } else if (desc.timbre.tipo === 'granular') {
     res = renderGranular(desc, sr, n, poly, lMin, lMax, fonte);
-    if (fonte) {  // só o que estiver dentro do polígono permanece
-      const entrada = new Float32Array(n + 2 * STFT_N);
-      entrada.set(res.saida, STFT_N);
-      res.saida = filtrarPorMascara(entrada, desc, sr, n, (t) => intervalosEmTempo(poly, t));
-    }
   } else res = renderCluster(desc, sr, n, poly, lMin, lMax);
+
+  // Máscara do polígono: sempre no som contínuo com arquivo; em todos os
+  // tipos quando a transposição está desligada.
+  const soFiltro = somenteFiltro(desc.timbre, fonte);
+  let picoAntesDoFiltro = null;
+  if (fonte && (soFiltro || desc.modo === 'continuo')) {
+    if (soFiltro) picoAntesDoFiltro = picoDe(res.saida);
+    const entrada = new Float32Array(n + 2 * STFT_N);
+    entrada.set(res.saida, STFT_N);
+    res.saida = filtrarPorMascara(entrada, desc, sr, n, (t) => intervalosEmTempo(poly, t));
+  }
 
   const { saida } = res;
 
@@ -785,12 +810,11 @@ export function renderizarContinuo(desc, sr, fonte = null) {
     saida[i] *= g; saida[n - 1 - i] *= g;
   }
 
-  let pico = 0;
-  for (let i = 0; i < n; i++) {
-    const v = Math.abs(saida[i]);
-    if (v > pico) pico = v;
-  }
-  const k = pico > 1e-9 ? ALVO_PICO / pico : 0;
+  const pico = picoDe(saida);
+  // Sem transposição, a referência é o material antes do filtro: o que a
+  // máscara retirou não é compensado.
+  const referencia = picoAntesDoFiltro ?? pico;
+  const k = referencia > 1e-9 ? ALVO_PICO / referencia : 0;
   const dados = new Float32Array(n);
   for (let i = 0; i < n; i++) dados[i] = saida[i] * k;
   return { dados, omitidos: res.omitidos, itens: res.itens, pico };

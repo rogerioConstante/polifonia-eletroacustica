@@ -707,6 +707,29 @@ function renderizarMaterial(box, cam, t, campo) {
   btn.addEventListener('click', (e) => { e.preventDefault(); preencher(); });
   preencher();
 
+  const rotuloT = document.createElement('label');
+  const chkT = document.createElement('input');
+  chkT.type = 'checkbox';
+  chkT.id = 'cTransporGrao';
+  chkT.checked = t.transporGrao !== false;
+  chkT.addEventListener('pointerdown', () => { if (camadaSelecionada()) pushUndo(); });
+  rotuloT.appendChild(chkT);
+  rotuloT.appendChild(document.createTextNode(' Transpor grãos para a altura-alvo'));
+  box.appendChild(rotuloT);
+  const dicaT = document.createElement('div');
+  dicaT.className = 'dica';
+  const atualizarDicaT = () => {
+    dicaT.textContent = chkT.checked ? ''
+      : 'Só a filtragem delimita o polígono; o nível pode ficar baixo ou chegar ao silêncio.';
+  };
+  atualizarDicaT();
+  box.appendChild(dicaT);
+  chkT.addEventListener('change', () => {
+    const cam2 = camadaSelecionada(); if (!cam2) return;
+    cam2.timbre.transporGrao = chkT.checked;
+    atualizarDicaT();
+  });
+
   campo('velocidadePercurso', 'Velocidade do percurso', 1, 1000, 1, t.velocidadePercurso ?? 100, '%');
   campo('aleatoriedadePosicao', 'Aleatoriedade da posição', 0, 100, 1, t.aleatoriedadePosicao ?? 0, '%');
 }

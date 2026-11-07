@@ -44,6 +44,9 @@ export function timbrePadrao(tipo) {
         // Material do grão: 'senoide' | 'arquivo' (nome em audios/).
         material: 'senoide',
         arquivo: '',
+        // Leva a frequência dominante do grão à altura-alvo. Desligado,
+        // só a máscara do polígono delimita as frequências.
+        transporGrao: true,
         // Percurso do cursor: 100% = velocidade original do arquivo.
         velocidadePercurso: 100,
         // Desvio da posição: 0% = linear; 100% = qualquer ponto do arquivo.

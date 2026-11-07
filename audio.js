@@ -383,6 +383,7 @@ export function gerarEventosCamada(cam, duracaoTotal) {
       vol: cam.volume != null ? cam.volume : 0.8,
       env: envEv,
       semente: (cam.semente ^ Math.imul(idxAtaque, 0x9E3779B1)) >>> 0,
+      _vertices: cam.vertices,
     });
   }
 
@@ -629,7 +630,8 @@ export async function prepararContinuos(eventos, sampleRate, aoProgredir = null)
       const desc = ev._cont
         ? { ...ev._cont, fonte }
         : { modo: 'nota', timbre: ev.timbre, semente: ev.semente,
-            t0: ev.t, t1: ev.t + ev.dur, f: ev.f, fonte };
+            t0: ev.t, t1: ev.t + ev.dur, f: ev.f, fonte,
+            vertices: ev.timbre.transporGrao === false ? ev._vertices : undefined };
       const r = await calcularContinuo(desc, sampleRate);
       ev._render = r;
       omitidos += r.omitidos || 0;
