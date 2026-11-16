@@ -5,7 +5,9 @@
 // ============================================================
 //
 // O navegador não lê pastas do disco: a lista vem da página de
-// diretório gerada pelo servidor local (iniciar-servidor.sh).
+// diretório gerada pelo servidor local (iniciar-servidor.sh). Onde não
+// há listagem de pasta (por exemplo, no GitHub Pages), usa-se a lista
+// fixa audios/lista.json.
 
 export const PASTA_AUDIOS = 'audios/';
 const EXTENSOES = /\.(wav|wave|flac|mp3|ogg|oga|opus|m4a|aac)$/i;
@@ -16,18 +18,34 @@ export function urlArquivo(nome) {
 
 /** Nomes dos arquivos de áudio da pasta, em ordem alfabética. */
 export async function listarArquivos() {
-  const resp = await fetch(PASTA_AUDIOS, { cache: 'no-store' });
-  if (!resp.ok) return [];
-  const html = await resp.text();
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  const nomes = [];
-  for (const a of doc.querySelectorAll('a[href]')) {
-    const href = a.getAttribute('href');
-    if (href.includes('/') || href.startsWith('?')) continue;
-    const nome = decodeURIComponent(href);
-    if (EXTENSOES.test(nome)) nomes.push(nome);
-  }
+  let nomes = [];
+  try {
+    const resp = await fetch(PASTA_AUDIOS, { cache: 'no-store' });
+    if (resp.ok) {
+      const html = await resp.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      for (const a of doc.querySelectorAll('a[href]')) {
+        const href = a.getAttribute('href');
+        if (href.includes('/') || href.startsWith('?')) continue;
+        const nome = decodeURIComponent(href);
+        if (EXTENSOES.test(nome)) nomes.push(nome);
+      }
+    }
+  } catch (_) { /* sem listagem de pasta: tenta a lista fixa */ }
+  if (!nomes.length) nomes = await listarArquivosFixos();
   return nomes.sort((x, y) => x.localeCompare(y, 'pt-BR'));
+}
+
+/** Lista fixa (audios/lista.json), para servidores sem listagem de pasta. */
+async function listarArquivosFixos() {
+  try {
+    const resp = await fetch(PASTA_AUDIOS + 'lista.json', { cache: 'no-store' });
+    if (!resp.ok) return [];
+    const lista = await resp.json();
+    return Array.isArray(lista) ? lista.filter(n => typeof n === 'string' && EXTENSOES.test(n)) : [];
+  } catch (_) {
+    return [];
+  }
 }
 
 /** Identifica o conteúdo do arquivo sem baixá-lo. */
