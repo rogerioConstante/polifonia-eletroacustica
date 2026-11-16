@@ -1,3 +1,6 @@
+/* Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+   Licença GPL-3.0 ou posterior (ver LICENSE). */
+
 * { box-sizing: border-box; }
 :root { --calha: 52px; }
 html, body {
@@ -257,3 +260,5 @@ body { display: flex; height: 100vh; overflow: hidden; }
 }
 
 #timbreParams audio { display: block; width: 100%; margin: 4px 0 8px; }
+
+#painel .credito { margin: -4px 0 10px; font-size: 11px; opacity: .65; }

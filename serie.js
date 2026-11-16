@@ -1,5 +1,7 @@
 // ============================================================
 // serie.js — Série de alturas (item 5). Módulo puro.
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 //
 // Sem imports de view/ui. Convenção de oitavas igual à do

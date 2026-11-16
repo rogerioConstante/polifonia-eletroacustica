@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------------------
+# Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante (GPL-3.0)
 # servidor-sem-cache.py
 # Servidor HTTP da pasta atual que manda o navegador revalidar cada
 # arquivo a cada carregamento. Assim, alterações em .js/.css valem

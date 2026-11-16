@@ -1,5 +1,7 @@
 // ============================================================
 // audio.js — Motor de áudio
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 //
 // Tipos de objeto:

@@ -1,5 +1,7 @@
 // ============================================================
 // main.js — Ponto de entrada; liga UI e inicia render
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 
 import { estado } from './model.js';

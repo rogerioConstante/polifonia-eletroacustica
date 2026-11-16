@@ -1,5 +1,7 @@
 // ============================================================
 // arquivos.js — Arquivos de áudio da pasta audios/
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 //
 // O navegador não lê pastas do disco: a lista vem da página de

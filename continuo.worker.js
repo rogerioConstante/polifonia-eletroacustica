@@ -1,5 +1,7 @@
 // ============================================================
 // continuo.worker.js — Calcula os sons fora da interface
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 import { renderizarContinuo, analisarFonte } from './continuo.js';
 

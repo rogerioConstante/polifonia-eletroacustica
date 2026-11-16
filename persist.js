@@ -1,5 +1,7 @@
 // ============================================================
 // persist.js — Salvar/abrir JSON e autosave em localStorage
+// Polifonia Eletroacústica — Copyright (C) 2026 Rogério Tavares Constante
+// Licença GPL-3.0 ou posterior (ver LICENSE).
 // ============================================================
 
 import { estado, criarProjeto, migrarProjeto } from './model.js';
